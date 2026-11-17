@@ -179,6 +179,19 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
+class ActivityEvent(Base):
+    """Worker and web share this ring of recent operational events."""
+
+    __tablename__ = "activity_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    level: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
+    kind: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class Event(Base):
     __tablename__ = "events"
 

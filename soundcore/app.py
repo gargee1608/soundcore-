@@ -102,6 +102,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     app.extensions["audio"] = audio
     app.extensions["udp_subscriber"] = subscriber
 
+    from soundcore.api.activity import bp as activity_bp
     from soundcore.api.admin import bp as admin_bp
     from soundcore.api.channels import bp as channels_bp
     from soundcore.api.export_import import bp as transfer_bp
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     app.register_blueprint(storage_bp)
     app.register_blueprint(transfer_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(activity_bp)
     _register_socket(bus)
     socketio.init_app(app)
 

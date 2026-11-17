@@ -286,11 +286,13 @@ class SanketHub:
         self._closed = False
         self._drop_client()
         url = self.broker_url
+        logger.info("sanket: connecting to broker %s", url)
         factory = self._factory or _paho_factory
         try:
             client = factory(url)
         except Exception as exc:
             self.last_error = str(exc)
+            logger.info("sanket: broker %s failed (%s); next %s", url, exc, BROKERS[(self.broker_index + 1) % len(BROKERS)])
             self._rotate_broker(failed_before_connect=True)
             return
         client.on_connect = self._on_connect
@@ -386,6 +388,11 @@ class SanketHub:
         self.backoff_s = 0.3
         self._subs = set()
         self._sync_subs()
+        logger.info(
+            "sanket: connected broker=%s subscriptions=%s",
+            self.broker_url,
+            ", ".join(self.subscriptions()) or "(none)",
+        )
         self.write_status()
 
     def _on_disconnect(self, client, userdata, flags=None, rc=None, props=None):
@@ -407,10 +414,13 @@ class SanketHub:
 
     def _rotate_broker(self, *, failed_before_connect: bool) -> None:
         if failed_before_connect:
+            previous = self.broker_url
             self.broker_index = (self.broker_index + 1) % len(BROKERS)
             self.backoff_s = min(30.0, max(0.3, self.backoff_s * 2))
+            logger.info("sanket: leaving broker %s; next %s in %.1fs", previous, self.broker_url, self.backoff_s)
         else:
             self.backoff_s = min(30.0, max(1.5, self.backoff_s))
+            logger.info("sanket: reconnecting to broker %s in %.1fs", self.broker_url, self.backoff_s)
         self.reconnects += 0
 
     def _sync_subs(self) -> None:
@@ -488,11 +498,19 @@ class SanketHub:
         state.last_talker = floor.get("name") or speaker
         state.clip_pcm.extend(pcm)
         state.clip_samples += len(pcm) // 2
-        if state.clip_samples >= int(MIN_CLIP_S * RATE):
+        crossed = state.clip_samples >= int(MIN_CLIP_S * RATE)
+        if crossed:
             chunk = bytes(state.clip_pcm)
             state.clip_pcm.clear()
             for capture in self._captures.get(channel, []):
                 capture.push(chunk)
+            if state.clip_samples <= int(MIN_CLIP_S * RATE) + (len(pcm) // 2):
+                logger.info(
+                    "sanket: audio on %s from %s (%d bytes)",
+                    channel,
+                    state.last_talker or speaker,
+                    len(pcm),
+                )
         if state.clip_samples >= int(MAX_CLIP_S * RATE):
             self._finish_clip(state)
 

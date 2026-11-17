@@ -163,6 +163,16 @@ def process_transcription_job(
         job.next_run_at = None
         job.attempts = row.attempt_count
         job.updated_at = now
+        from soundcore.activity import record_activity
+        from soundcore.models import Channel
+
+        channel = session.get(Channel, recording.channel_id)
+        record_activity(
+            "transcription_done",
+            f"Transcript ready for {recording.filename}",
+            channel=channel.slug if channel is not None else "",
+            session=session,
+        )
         return "done"
 
     try:

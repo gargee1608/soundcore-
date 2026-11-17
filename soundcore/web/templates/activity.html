@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Activity · SoundCore{% endblock %}
+{% block eyebrow %}Live{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Activity</h1>
+    <p class="lede">Inputs, outputs, routes, and the last events from the worker. This page refreshes every two seconds.</p>
+  </div>
+</section>
+
+<section class="panel" id="activity-connections">
+  <h2>Connections</h2>
+  <div class="diag" id="conn"></div>
+</section>
+
+<section class="panel">
+  <h2>Inputs and outputs</h2>
+  <div class="stack-list" id="devices"></div>
+</section>
+
+<section class="panel">
+  <h2>Routes</h2>
+  <table class="grid">
+    <thead><tr><th>From</th><th>To</th><th>State</th><th>Rate</th><th>Recording</th></tr></thead>
+    <tbody id="routes"></tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Events</h2>
+  <form class="route-form" id="filters">
+    <label>Type
+      <select id="kind">
+        <option value="">All</option>
+        <option value="channel_started">Channel started</option>
+        <option value="channel_stopped">Channel stopped</option>
+        <option value="transmission">Transmission</option>
+        <option value="file_closed">File closed</option>
+        <option value="route_started">Route started</option>
+        <option value="error">Error</option>
+        <option value="upload_done">Upload</option>
+        <option value="transcription_done">Transcription</option>
+      </select>
+    </label>
+    <label>Channel <input id="channel" placeholder="slug"></label>
+  </form>
+  <ul class="alert-list" id="events"></ul>
+</section>
+
+<script id="activity-initial" type="application/json">{{ initial|tojson }}</script>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  const initial = JSON.parse(document.getElementById("activity-initial").textContent);
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"]/g, function (ch) {
+      return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[ch];
+    });
+  }
+  function meter(level) {
+    const width = Math.max(0, Math.min(100, Math.round((level || 0) * 100)));
+    return '<div class="meter"><span style="width:' + width + '%"></span></div>';
+  }
+  function render(data) {
+    const c = data.connections || {};
+    const sanket = c.sanket || {};
+    const talkers = (sanket.talkers || []).map(function (row) {
+      return row.channel + ": " + row.talking;
+    }).join(", ");
+    document.getElementById("conn").innerHTML = [
+      "<p><span>SanketPTT</span> " + (sanket.connected ? "connected" : "failing") + " " + esc(sanket.broker) + (sanket.last_error ? " — " + esc(sanket.last_error) : "") + "</p>",
+      "<p><span>Subscribed</span> " + esc((sanket.subscribed || []).join(", ") || "none") + "</p>",
+      "<p><span>Talker</span> " + esc(talkers || "none") + "</p>",
+      "<p><span>PipeWire</span> " + ((c.pipewire || {}).reachable ? "reachable" : "not reachable") + " " + esc((c.pipewire || {}).error || "") + "</p>",
+      "<p><span>Bluetooth</span> " + ((c.bluetooth || {}).connected ? "connected" : "not connected") + " " + esc(((c.bluetooth || {}).devices || []).join(", ")) + "</p>",
+      "<p><span>S3</span> " + ((c.s3 || {}).configured ? "configured" : "not configured") + ", waiting " + ((c.s3 || {}).waiting || 0) + ", last " + esc((c.s3 || {}).last_upload || "never") + "</p>",
+      "<p><span>Boondock</span> queue " + ((c.transcription || {}).queued || 0) + ", last " + esc((c.transcription || {}).last_text || "none") + "</p>",
+      "<p><span>Disk</span> " + Math.round(((c.disk || {}).free_ratio || 0) * 100) + "% free</p>"
+    ].join("");
+    document.getElementById("devices").innerHTML = (data.channels || []).map(function (row) {
+      return '<article><strong>' + esc(row.name) + '</strong> <span class="meta">' +
+        esc(row.direction) + ' · ' + esc(row.backend) + ' · ' + (row.available ? "available" : "unavailable") +
+        ' · ' + (row.enabled ? "enabled" : "off") + ' · ' + esc(row.status) +
+        '</span>' + meter(row.level) +
+        '<span class="meta">last audio ' + esc(row.last_audio || "—") +
+        (row.recording_file ? " · " + esc(row.recording_file) : "") +
+        (row.error ? " · " + esc(row.error) : "") + '</span></article>';
+    }).join("") || '<p class="muted">No channels yet.</p>';
+    document.getElementById("routes").innerHTML = (data.routes || []).map(function (row) {
+      const rate = Math.round(row.bytes_per_sec || 0) + " B/s · " + (row.packets_per_sec || 0).toFixed(1) + " pkt/s";
+      return "<tr><td>" + esc(row.input) + " <span class=\"meta\">" + esc(row.input_backend) + "</span></td><td>" +
+        esc(row.output) + " <span class=\"meta\">" + esc(row.output_backend) + "</span></td><td>" + esc(row.state) +
+        "</td><td>" + esc(rate) + "</td><td>" + esc(row.recording_file || "—") + "</td></tr>";
+    }).join("");
+    document.getElementById("events").innerHTML = (data.events || []).map(function (row) {
+      return '<li class="' + esc(row.level) + '"><div><strong>' + esc(row.kind) + '</strong> ' + esc(row.message) +
+        '<span>' + esc(row.created_at) + (row.channel ? " · " + esc(row.channel) : "") + '</span></div></li>';
+    }).join("") || '<li><div class="muted">No events yet.</div></li>';
+  }
+  async function refresh() {
+    const params = new URLSearchParams();
+    const kind = document.getElementById("kind").value;
+    const channel = document.getElementById("channel").value.trim();
+    if (kind) params.set("kind", kind);
+    if (channel) params.set("channel", channel);
+    params.set("limit", "200");
+    const response = await fetch("/api/activity?" + params.toString(), {headers: {"Accept": "application/json"}});
+    if (!response.ok) return;
+    render(await response.json());
+  }
+  render(initial);
+  document.getElementById("kind").addEventListener("change", refresh);
+  document.getElementById("channel").addEventListener("change", refresh);
+  setInterval(refresh, 1500);
+})();
+</script>
+{% endblock %}

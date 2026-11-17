@@ -140,6 +140,8 @@ class AudioService:
         self._thread: threading.Thread | None = None
         self._runtime_cache = None
         self._runtime_at = 0.0
+        self._flow: dict[int, dict] = {}
+        self._flow_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -222,6 +224,10 @@ class AudioService:
             stop.set()
             thread.join(timeout=3)
             self._set_level(channel_id, 0.0)
+            self._note_flow(channel_id, status="off")
+            from soundcore.activity import record_activity
+
+            record_activity("channel_stopped", f"Input {channel_id} stopped", channel=str(channel_id))
 
         for channel_id, spec in desired_specs.items():
             current = self._workers.get(channel_id)
@@ -240,6 +246,13 @@ class AudioService:
                 )
                 self._workers[channel_id] = (spec.signature, stop, thread)
                 thread.start()
+                from soundcore.activity import record_activity
+
+                record_activity(
+                    "channel_started",
+                    f"{spec.name} started on {spec.audio_backend}",
+                    channel=spec.slug,
+                )
 
     def _sync_sanket(self, session, enabled_inputs) -> None:
         from soundcore.audio.sanketptt import channel_from_device, device_id_for, get_hub
@@ -338,7 +351,9 @@ class AudioService:
                         self._finalize(recording_id, writer)
                         writer = None
                         recording_id = None
+                        self._note_flow(spec.id, status="idle", recording_file="", recording_started="")
                     self._set_level(spec.id, 0.0)
+                    self._note_flow(spec.id, status="idle", level=0.0)
                     stop.wait(0.05)
                     continue
                 rotate = writer is None or (now_mono - chunk_started) >= runtime.chunk_seconds
@@ -371,15 +386,37 @@ class AudioService:
                             continue
                 try:
                     pcm = capture.read(frames)
-                except Exception:
+                except Exception as exc:
                     logger.exception("read failed on %s", spec.device_id)
+                    self._note_flow(spec.id, status="error", error=str(exc))
+                    from soundcore.activity import record_activity
+
+                    record_activity("error", f"{spec.name}: {exc}", channel=spec.slug, level="error")
                     stop.wait(1)
                     continue
                 if not pcm:
                     stop.wait(0.2)
                     continue
                 fanout(pcm, writer, list(playbacks), self.bus, spec.id, spec.sample_rate)
-                self._set_level(spec.id, pcm_rms(pcm))
+                level = pcm_rms(pcm)
+                self._set_level(spec.id, level)
+                state = "receiving" if spec.audio_backend == "sanketptt" else "capturing"
+                previous = self._flow_status(spec.id)
+                self._note_flow(
+                    spec.id,
+                    status=state,
+                    level=level,
+                    packet_bytes=len(pcm),
+                    recording_file=str(getattr(writer, "path", "") or ""),
+                )
+                if spec.audio_backend == "sanketptt" and previous not in {"receiving", "capturing"}:
+                    from soundcore.activity import record_activity
+
+                    record_activity(
+                        "transmission",
+                        f"Transmission on {spec.name}",
+                        channel=spec.slug,
+                    )
                 self._note_playbacks(playbacks)
                 next_tick += frame_seconds
                 delay = next_tick - time.monotonic()
@@ -434,6 +471,15 @@ class AudioService:
                 logger.exception("playback failed to start for %s", target.device_id)
             playbacks.append(playback)
             open_ids.append(target.device_id)
+            from soundcore.activity import record_activity
+
+            record_activity(
+                "route_started",
+                f"{spec.name} routed to {target.output_name}"
+                + ("" if target.connected else " (destination disconnected)"),
+                channel=spec.slug,
+                level="info" if target.connected else "warning",
+            )
         self._note_playbacks(playbacks)
 
     def _note_playbacks(self, playbacks: list) -> None:
@@ -496,6 +542,7 @@ class AudioService:
             "notices": notices,
             "playbacks": playbacks,
             "last_error": last_error,
+            "flow": self._flow_snapshot(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         path = Path(self.settings.data_dir) / "logs" / "audio_status.json"
@@ -505,6 +552,71 @@ class AudioService:
         except OSError:
             logger.debug("could not write audio status", exc_info=True)
 
+
+    def _flow_status(self, channel_id: int) -> str:
+        with self._flow_lock:
+            return str((self._flow.get(channel_id) or {}).get("status") or "")
+
+    def _note_flow(self, channel_id: int, *, status: str, level: float | None = None, packet_bytes: int = 0, recording_file: str = "", recording_started: str = "", error: str = "") -> None:
+        now = time.monotonic()
+        with self._flow_lock:
+            row = self._flow.setdefault(
+                channel_id,
+                {
+                    "status": "idle",
+                    "level": 0.0,
+                    "last_audio": "",
+                    "bytes_window": 0,
+                    "packets_window": 0,
+                    "window_started": now,
+                    "bytes_per_sec": 0.0,
+                    "packets_per_sec": 0.0,
+                    "recording_file": "",
+                    "recording_started": "",
+                    "error": "",
+                },
+            )
+            row["status"] = status
+            if level is not None:
+                row["level"] = level
+            if error:
+                row["error"] = error
+            elif status != "error":
+                row["error"] = ""
+            if recording_file:
+                row["recording_file"] = recording_file
+            if recording_started:
+                row["recording_started"] = recording_started
+            if status == "idle":
+                row["recording_file"] = recording_file
+                row["recording_started"] = recording_started
+            if packet_bytes:
+                row["last_audio"] = datetime.now(timezone.utc).isoformat()
+                row["bytes_window"] += packet_bytes
+                row["packets_window"] += 1
+            elapsed = now - float(row["window_started"])
+            if elapsed >= 1.0:
+                row["bytes_per_sec"] = row["bytes_window"] / elapsed
+                row["packets_per_sec"] = row["packets_window"] / elapsed
+                row["bytes_window"] = 0
+                row["packets_window"] = 0
+                row["window_started"] = now
+
+    def _flow_snapshot(self) -> dict:
+        with self._flow_lock:
+            out = {}
+            for channel_id, row in self._flow.items():
+                out[str(channel_id)] = {
+                    "status": row["status"],
+                    "level": row["level"],
+                    "last_audio": row["last_audio"],
+                    "bytes_per_sec": row["bytes_per_sec"],
+                    "packets_per_sec": row["packets_per_sec"],
+                    "recording_file": row["recording_file"],
+                    "recording_started": row["recording_started"],
+                    "error": row["error"],
+                }
+            return out
 
     def _runtime(self):
         now = time.monotonic()
@@ -589,6 +701,15 @@ class AudioService:
                 runtime = load_runtime(session, self.settings)
                 if runtime.transcribe_enabled:
                     enqueue_transcription(session, recording)
+                channel = session.get(Channel, recording.channel_id)
+                from soundcore.activity import record_activity
+
+                record_activity(
+                    "file_closed",
+                    f"Closed {recording.filename} ({stats['duration_s']:.1f}s)",
+                    channel=channel.slug if channel is not None else "",
+                    session=session,
+                )
         except Exception:
             logger.exception("failed to finalize recording %s", recording_id)
 

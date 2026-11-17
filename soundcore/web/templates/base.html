@@ -24,6 +24,7 @@
     </a>
     <nav>
       <a href="{{ url_for('pages.dashboard') }}" {% if request.endpoint == 'pages.dashboard' %}aria-current="page"{% endif %}>Desk</a>
+      <a href="{{ url_for('pages.activity_page') }}" {% if request.endpoint == 'pages.activity_page' %}aria-current="page"{% endif %}>Activity</a>
       <a href="{{ url_for('pages.channels') }}" {% if request.endpoint == 'pages.channels' %}aria-current="page"{% endif %}>Channels</a>
       <a href="{{ url_for('pages.routing') }}" {% if request.endpoint == 'pages.routing' %}aria-current="page"{% endif %}>Routing</a>
       <a href="{{ url_for('pages.recordings') }}" {% if request.endpoint == 'pages.recordings' %}aria-current="page"{% endif %}>Recordings</a>

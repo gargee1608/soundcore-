@@ -114,6 +114,9 @@ def offload_recording(
         # Commit the verified mark before unlinking so a crash cannot lose the
         # only copy while the database still says it was never verified.
         session.commit()
+        from soundcore.activity import record_activity
+
+        record_activity("upload_done", f"Verified upload {key}", channel=str(recording.channel_id))
 
     if not delete_local:
         return "verified_kept"

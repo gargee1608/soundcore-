@@ -213,6 +213,8 @@ These are sign-in, the desk, listening, and read-only JSON. `/login`, `/healthz`
 | POST | `/login` | `https://<pi-hostname-or-ip>/login` | `http://127.0.0.1:8741/login` | Sign in |
 | POST | `/logout` | `https://<pi-hostname-or-ip>/logout` | `http://127.0.0.1:8741/logout` | Sign out |
 | GET | `/` | `https://<pi-hostname-or-ip>/` | `http://127.0.0.1:8741/` | Desk |
+| GET | `/activity` | `https://<pi-hostname-or-ip>/activity` | `http://127.0.0.1:8741/activity` | Live inputs, routes, and event log |
+| GET | `/api/activity` | `https://<pi-hostname-or-ip>/api/activity` | `http://127.0.0.1:8741/api/activity` | Activity JSON: snapshot plus recent events |
 | GET | `/channels` | `https://<pi-hostname-or-ip>/channels` | `http://127.0.0.1:8741/channels` | Channel list |
 | GET | `/routing` | `https://<pi-hostname-or-ip>/routing` | `http://127.0.0.1:8741/routing` | Route list |
 | GET | `/recordings` | `https://<pi-hostname-or-ip>/recordings` | `http://127.0.0.1:8741/recordings` | Recording list |

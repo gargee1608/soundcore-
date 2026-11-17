@@ -10,6 +10,7 @@ from flask import (
     url_for,
 )
 
+from soundcore.activity import build_activity
 from soundcore.audio.detect import AudioBackendError
 from soundcore.audio.sanketptt import device_id_for, load_sanket_status, parse_sanket_source, web_url
 from soundcore.audio.service import load_audio_status
@@ -99,6 +100,14 @@ def _audio_panel(backend, settings, channels):
         "input_backends": sorted({device.backend for device in devices if device.direction == "in"}),
         "output_backends": sorted({device.backend for device in devices if device.direction == "out"}),
     }
+
+
+@bp.get("/activity")
+@login_required
+def activity_page():
+    settings = current_app.config["SETTINGS"]
+    payload = build_activity(g.db, settings, current_app.extensions.get("audio_backend"))
+    return render_template("activity.html", initial=payload)
 
 
 @bp.get("/channels")
