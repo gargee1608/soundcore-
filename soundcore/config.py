@@ -1,7 +1,8 @@
 """Runtime configuration from the environment and an optional JSON file.
 
-Environment variables win over the file. Nothing here has a usable default
-password, API key, or cloud credential.
+Environment variables win over the file. The admin password defaults to
+``C1nb3rr1`` so a new install can sign in. API keys and cloud credentials
+still have no usable default.
 """
 
 from __future__ import annotations
@@ -32,6 +33,9 @@ def _float(value: str | None, default: float) -> float:
     return float(value)
 
 
+DEFAULT_ADMIN_PASSWORD = "C1nb3rr1"
+
+
 def local_timezone_name() -> str:
     from datetime import datetime
 
@@ -52,7 +56,7 @@ class Settings:
     behind_proxy: bool = False
     cookie_secure: bool = False
     admin_email: str = ""
-    admin_password: str = ""
+    admin_password: str = DEFAULT_ADMIN_PASSWORD
     reset_admin: bool = False
     audio_backend: str = "auto"
     embed_worker: bool = True
@@ -180,7 +184,10 @@ def load_settings(*, dotenv: bool = False, environ: dict | None = None) -> Setti
         behind_proxy=_bool(str(raw("behind_proxy", "SOUNDCORE_BEHIND_PROXY", "")) or None, False),
         cookie_secure=_bool(str(raw("cookie_secure", "SOUNDCORE_COOKIE_SECURE", "")) or None, False),
         admin_email=str(raw("admin_email", "SOUNDCORE_ADMIN_EMAIL", "") or ""),
-        admin_password=str(raw("admin_password", "SOUNDCORE_ADMIN_PASSWORD", "") or ""),
+        admin_password=str(
+            raw("admin_password", "SOUNDCORE_ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
+            or DEFAULT_ADMIN_PASSWORD
+        ),
         reset_admin=_bool(str(raw("reset_admin", "SOUNDCORE_RESET_ADMIN", "")) or None, False),
         audio_backend=str(raw("audio_backend", "SOUNDCORE_AUDIO_BACKEND", "auto") or "auto"),
         embed_worker=_bool(str(raw("embed_worker", "SOUNDCORE_EMBED_WORKER", "")) or None, True),

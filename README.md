@@ -6,6 +6,18 @@ Transcription goes to the Boondock API. Long-term copies go to S3, and a local f
 
 The web process is Flask plus a plain HTML, CSS, and JavaScript console. The database is SQLite through SQLAlchemy, so a later move to Postgres is a `SOUNDCORE_DATABASE_URL` change rather than a rewrite.
 
+**Install on a Raspberry Pi 5:** [docs/INSTALL_GUIDE.md](docs/INSTALL_GUIDE.md)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gargee1608/soundcore-/main/scripts/bootstrap.sh | sudo bash
+```
+
+Sign in at `https://<pi-hostname-or-ip>/login` as `admin@localhost` with password `C1nb3rr1`. Change that default after install:
+
+```bash
+sudo soundcore-passwd '<newpassword>'
+```
+
 ## Run it here, without a Pi
 
 Simulated radios, an FM receiver, a handheld, a software-PTT input, a 3.5 mm input, and two USB outputs are built in. No ALSA device is required.
@@ -19,7 +31,7 @@ cp .env.example .env
 
 Edit `.env`:
 
-- `SOUNDCORE_ADMIN_EMAIL` and `SOUNDCORE_ADMIN_PASSWORD` — required. There is no default password.
+- `SOUNDCORE_ADMIN_EMAIL` is `admin@localhost`. `SOUNDCORE_ADMIN_PASSWORD` defaults to `C1nb3rr1`. Change it after install with `sudo soundcore-passwd '<newpassword>'`.
 - `SOUNDCORE_AUDIO_BACKEND=simulated`
 - `SOUNDCORE_EMBED_WORKER=1` so capture runs inside the web process
 - `SOUNDCORE_SEED_DEMO=1` to enable the first three inputs on a new database
@@ -44,13 +56,29 @@ pytest
 
 ## Run it on a Raspberry Pi 5
 
-Raspberry Pi OS 64-bit. Plug in the USB audio cards before the first scan.
+The step-by-step guide, including every URL the console exposes, is [docs/INSTALL_GUIDE.md](docs/INSTALL_GUIDE.md).
+
+Raspberry Pi OS 64-bit. Plug in the USB audio cards before the first scan. The one-line installer installs git and Caddy, clones this repo to `/opt/soundcore`, runs `install.sh`, and starts the services:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gargee1608/soundcore-/main/scripts/bootstrap.sh | sudo bash
+```
+
+Sign in as `admin@localhost` with password `C1nb3rr1`, then change it:
+
+```bash
+sudo soundcore-passwd '<newpassword>'
+```
+
+The same command is `sudo /opt/soundcore/scripts/set_admin_password.sh '<newpassword>'`. It writes `/etc/soundcore/soundcore.env`, updates the admin password hash in the database, and restarts the services.
+
+Manual install, if you already have the tree on the Pi:
 
 ```bash
 sudo ./install.sh
-sudo edit /etc/soundcore/soundcore.env
-sudo systemctl enable --now soundcore-worker.service soundcore.service
 ```
+
+`install.sh` writes the default password when the env file does not already have one, installs `soundcore-passwd` on `PATH`, and starts the services. You do not edit the env file before the first start.
 
 The install script:
 
@@ -68,11 +96,13 @@ Flask binds to `127.0.0.1:8741` only. Put Caddy or nginx in front of it:
 
 Do not publish port 8741.
 
-Set the admin password in `/etc/soundcore/soundcore.env` before starting. To change it later:
+The shipped admin password is `C1nb3rr1`. Change it after install:
 
 ```bash
-# set SOUNDCORE_ADMIN_PASSWORD and SOUNDCORE_RESET_ADMIN=1, restart once, then set RESET back to 0
+sudo soundcore-passwd '<newpassword>'
 ```
+
+A manual fallback is in [docs/INSTALL_GUIDE.md](docs/INSTALL_GUIDE.md): set `SOUNDCORE_ADMIN_PASSWORD` and `SOUNDCORE_RESET_ADMIN=1` in `/etc/soundcore/soundcore.env`, restart once, then set `SOUNDCORE_RESET_ADMIN` back to `0`.
 
 `sudo ./uninstall.sh` removes the program and leaves recordings. `sudo ./uninstall.sh --purge` removes `/var/lib/soundcore` as well.
 
@@ -90,7 +120,7 @@ Set the admin password in `/etc/soundcore/soundcore.env` before starting. To cha
 
 ## Configuration
 
-Secrets are read from the environment or from the optional JSON file in `SOUNDCORE_CONFIG`. The environment wins. Nothing in the repository is a usable password, API key, or cloud credential.
+Secrets are read from the environment or from the optional JSON file in `SOUNDCORE_CONFIG`. The environment wins. The repository ships one usable password, the admin default `C1nb3rr1`. Change it after install. API keys and cloud credentials are still not in the repository.
 
 If `SOUNDCORE_SECRET_KEY` is empty, a key is generated into the data directory and kept there. It is not a stand-in for the admin password.
 
@@ -129,7 +159,8 @@ Layout:
 soundcore/            Flask app, models, audio, storage, transcription
 soundcore/web/        HTML, CSS, and JavaScript
 deploy/               systemd units, Caddyfile, nginx example
-scripts/              capacity estimate, export, import
+scripts/              capacity estimate, export, import, bootstrap, password change
+docs/                 Raspberry Pi install guide
 tests/                pytest, no Pi required
 ```
 

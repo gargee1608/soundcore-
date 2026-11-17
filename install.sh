@@ -52,26 +52,32 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     "${ENV_FILE}"
   chmod 600 "${ENV_FILE}"
 fi
+# The shipped default lets the services start without a manual edit.
+# Leave a password that was already chosen on a previous install alone.
+if grep -Eq '^SOUNDCORE_ADMIN_PASSWORD=.+$' "${ENV_FILE}"; then
+  :
+elif grep -q '^SOUNDCORE_ADMIN_PASSWORD=' "${ENV_FILE}"; then
+  sed -i 's|^SOUNDCORE_ADMIN_PASSWORD=.*|SOUNDCORE_ADMIN_PASSWORD=C1nb3rr1|' "${ENV_FILE}"
+else
+  printf '\nSOUNDCORE_ADMIN_PASSWORD=C1nb3rr1\n' >> "${ENV_FILE}"
+fi
 chown root:"${SERVICE_USER}" "${ENV_FILE}"
 chmod 640 "${ENV_FILE}"
 
 cp "${INSTALL_ROOT}/deploy/soundcore.service" /etc/systemd/system/soundcore.service
 cp "${INSTALL_ROOT}/deploy/soundcore-worker.service" /etc/systemd/system/soundcore-worker.service
+install -m 0755 "${INSTALL_ROOT}/scripts/set_admin_password.sh" /usr/local/bin/soundcore-passwd
 systemctl daemon-reload
+systemctl enable --now soundcore-worker.service soundcore.service
 
 echo
 echo "SoundCore is installed in ${INSTALL_ROOT}."
 echo "Data directory: ${DATA_DIR}"
-echo "Edit ${ENV_FILE} and set SOUNDCORE_ADMIN_PASSWORD before starting."
-echo "Optional: S3 keys, SOUNDCORE_BOONDOCK_API_KEY, SMTP, SOUNDCORE_TIMEZONE."
+echo "Services started."
+echo "Sign in as admin@localhost. The shipped admin password is C1nb3rr1."
+echo "Change it now: sudo soundcore-passwd '<newpassword>'"
+echo "Optional: S3 keys, SOUNDCORE_BOONDOCK_API_KEY, SMTP, SOUNDCORE_TIMEZONE in ${ENV_FILE}."
 echo
-if grep -Eq '^SOUNDCORE_ADMIN_PASSWORD=.+$' "${ENV_FILE}"; then
-  systemctl enable --now soundcore-worker.service soundcore.service
-  echo "Services started."
-else
-  echo "Not started yet. After the password is set:"
-  echo "  sudo systemctl enable --now soundcore-worker.service soundcore.service"
-fi
-echo
-echo "HTTPS: point Caddy at deploy/Caddyfile, or nginx at deploy/nginx.conf.example."
+echo "HTTPS: scripts/bootstrap.sh installs Caddy with deploy/Caddyfile."
+echo "Or point nginx at deploy/nginx.conf.example."
 echo "Do not publish port ${FLASK_PORT}."
