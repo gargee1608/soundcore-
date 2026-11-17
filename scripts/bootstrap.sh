@@ -50,9 +50,12 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [[ -d "${INSTALL_ROOT}/.git" ]]; then
-  git -c safe.directory="${INSTALL_ROOT}" -C "${INSTALL_ROOT}" fetch origin "${BRANCH}"
-  git -c safe.directory="${INSTALL_ROOT}" -C "${INSTALL_ROOT}" checkout "${BRANCH}"
-  git -c safe.directory="${INSTALL_ROOT}" -C "${INSTALL_ROOT}" pull --ff-only origin "${BRANCH}"
+  # The first run is a shallow single-branch clone. Fetch that one branch by
+  # name and move the local branch onto it. This stays a fast-forward of the
+  # install tree; nothing is force-pushed.
+  git -c safe.directory="${INSTALL_ROOT}" -C "${INSTALL_ROOT}" fetch --depth 1 origin \
+    "${BRANCH}:refs/remotes/origin/${BRANCH}"
+  git -c safe.directory="${INSTALL_ROOT}" -C "${INSTALL_ROOT}" checkout -B "${BRANCH}" "refs/remotes/origin/${BRANCH}"
 else
   if [[ -d "${INSTALL_ROOT}" ]]; then
     rm -rf "${INSTALL_ROOT}"

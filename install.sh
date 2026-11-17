@@ -80,11 +80,17 @@ chmod 640 "${ENV_FILE}"
 
 cp "${INSTALL_ROOT}/deploy/soundcore.service" /etc/systemd/system/soundcore.service
 cp "${INSTALL_ROOT}/deploy/soundcore-worker.service" /etc/systemd/system/soundcore-worker.service
+# bootstrap.sh clones straight into INSTALL_ROOT and then runs this script
+# from there. GNU install refuses to copy a file onto itself, so only chmod
+# the in-tree scripts and copy the two PATH commands to /usr/local/bin.
+chmod 0755 \
+  "${INSTALL_ROOT}/scripts/set_admin_password.sh" \
+  "${INSTALL_ROOT}/scripts/audio_diagnostics.sh" \
+  "${INSTALL_ROOT}/scripts/wait_for_pulse_socket.sh" \
+  "${INSTALL_ROOT}/scripts/pulse_socket_access.sh" \
+  "${INSTALL_ROOT}/scripts/audio_bridge.py"
 install -m 0755 "${INSTALL_ROOT}/scripts/set_admin_password.sh" /usr/local/bin/soundcore-passwd
 install -m 0755 "${INSTALL_ROOT}/scripts/audio_diagnostics.sh" /usr/local/bin/soundcore-audio-diagnostics
-install -m 0755 "${INSTALL_ROOT}/scripts/wait_for_pulse_socket.sh" "${INSTALL_ROOT}/scripts/wait_for_pulse_socket.sh"
-install -m 0755 "${INSTALL_ROOT}/scripts/pulse_socket_access.sh" "${INSTALL_ROOT}/scripts/pulse_socket_access.sh"
-chmod 0755 "${INSTALL_ROOT}/scripts/audio_bridge.py" || true
 
 # Real hardware playback uses the desktop user's PipeWire. The worker stays
 # unprivileged. A group-owned socket is the path; the localhost bridge is
