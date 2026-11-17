@@ -12,7 +12,13 @@ from flask import (
 
 from soundcore.activity import build_activity
 from soundcore.audio.detect import AudioBackendError
-from soundcore.audio.sanketptt import device_id_for, load_sanket_status, parse_sanket_source, web_url
+from soundcore.audio.sanketptt import (
+    default_device_name,
+    device_id_for,
+    load_sanket_status,
+    parse_sanket_source,
+    web_url,
+)
 from soundcore.audio.service import load_audio_status
 from soundcore.auth import authenticate, login_required, login_user, logout_user
 from soundcore.maintenance import run_guard
@@ -137,15 +143,26 @@ def channels():
         sanket_ids=[row.device_id for row in rows if (row.audio_backend or "") == "sanketptt"],
         sanket_discover=_flag(g.db, "sanket_discover"),
         sanket_auto_add=_flag(g.db, "sanket_auto_add"),
+        sanket_always_on=_flag(g.db, "sanket_always_on", default=True),
+        sanket_device_name=_text_setting(g.db, "sanket_device_name") or default_device_name(),
         active_inputs=active,
         stream_cap=runtime.stream_cap,
         web_url=web_url,
     )
 
 
-def _flag(session, key: str) -> bool:
+def _flag(session, key: str, default: bool = False) -> bool:
     row = session.get(Setting, key)
-    return bool(row and str(row.value).strip().lower() in {"1", "true", "yes", "on"})
+    if row is None or row.value is None or str(row.value) == "":
+        return default
+    return str(row.value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _text_setting(session, key: str) -> str:
+    row = session.get(Setting, key)
+    if row is None or not row.value:
+        return ""
+    return str(row.value).strip()
 
 
 @bp.post("/channels/sanket")
@@ -195,6 +212,18 @@ def channels_sanket_discover():
 def channels_sanket_auto_add():
     set_setting(g.db, "sanket_auto_add", "1" if request.form.get("enabled") == "on" else "0")
     flash("Auto-add is on. New channels are saved turned off so the stream cap still applies." if request.form.get("enabled") == "on" else "Auto-add is off.", "ok")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.post("/channels/sanket/always-on")
+@login_required
+def channels_sanket_always_on():
+    enabled = request.form.get("enabled") == "on"
+    name = (request.form.get("device_name") or "").strip()[:40]
+    set_setting(g.db, "sanket_always_on", "1" if enabled else "0")
+    if name:
+        set_setting(g.db, "sanket_device_name", name)
+    flash("SanketPTT stays powered on and shows as online." if enabled else "SanketPTT presence is off.", "ok")
     return redirect(url_for("pages.channels"))
 
 

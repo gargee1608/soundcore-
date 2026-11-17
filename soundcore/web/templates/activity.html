@@ -70,7 +70,7 @@
       return row.channel + ": " + row.talking;
     }).join(", ");
     document.getElementById("conn").innerHTML = [
-      "<p><span>SanketPTT</span> " + (sanket.connected ? "connected" : "failing") + " " + esc(sanket.broker) + (sanket.last_error ? " — " + esc(sanket.last_error) : "") + "</p>",
+      "<p><span>SanketPTT</span> " + (sanket.power === "online" ? "Powered on · online as " + esc(sanket.presence_name) : (sanket.power === "reconnecting" ? "Reconnecting" : (sanket.connected ? "connected" : "powered off"))) + " " + esc(sanket.broker) + (sanket.last_error ? " — " + esc(sanket.last_error) : "") + "</p>",
       "<p><span>Subscribed</span> " + esc((sanket.subscribed || []).join(", ") || "none") + "</p>",
       "<p><span>Talker</span> " + esc(talkers || "none") + "</p>",
       "<p><span>PipeWire</span> " + ((c.pipewire || {}).reachable ? "reachable" : "not reachable") + " " + esc((c.pipewire || {}).error || "") + "</p>",

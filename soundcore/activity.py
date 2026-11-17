@@ -232,6 +232,8 @@ def build_activity(session, settings, backend=None, *, kind: str = "", channel: 
                 "connected": bool(sanket.get("connected")),
                 "broker": sanket.get("broker") or sanket.get("broker_url") or "",
                 "last_error": sanket.get("last_error") or "",
+                "power": sanket.get("power") or ("online" if sanket.get("connected") else "off"),
+                "presence_name": sanket.get("presence_name") or "",
                 "subscribed": sanket.get("subscribed") or [],
                 "talkers": [
                     {"channel": name, "talking": row.get("talking") or ""}

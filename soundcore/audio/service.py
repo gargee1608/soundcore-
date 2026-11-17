@@ -255,13 +255,22 @@ class AudioService:
                 )
 
     def _sync_sanket(self, session, enabled_inputs) -> None:
-        from soundcore.audio.sanketptt import channel_from_device, device_id_for, get_hub
+        from soundcore.activity import record_activity
+        from soundcore.audio.sanketptt import (
+            channel_from_device,
+            default_device_name,
+            device_id_for,
+            get_hub,
+            load_client_id,
+        )
         from soundcore.models import Channel, Setting
         from soundcore.ops import save_channel
 
-        def flag(key: str) -> bool:
+        def flag(key: str, default: bool = False) -> bool:
             row = session.get(Setting, key)
-            return bool(row and row.value.strip().lower() in {"1", "true", "yes", "on"})
+            if row is None or row.value is None or row.value == "":
+                return default
+            return row.value.strip().lower() in {"1", "true", "yes", "on"}
 
         hub = get_hub()
         hub.data_dir = Path(self.settings.data_dir)
@@ -272,8 +281,18 @@ class AudioService:
                 names.append(channel_from_device(row.device_id or row.alsa_device))
         discover = flag("sanket_discover")
         auto_add = flag("sanket_auto_add")
+        always_on = flag("sanket_always_on", True)
+        name_row = session.get(Setting, "sanket_device_name")
+        presence_name = (name_row.value.strip() if name_row is not None and name_row.value else "") or default_device_name()
+        was_online = hub.presence_enabled and bool(hub._channels)
         hub.set_channels(names)
         hub.set_discover(discover or auto_add)
+        hub.set_presence(always_on and bool(names), presence_name, load_client_id(self.settings.data_dir))
+        now_online = hub.presence_enabled and bool(names)
+        if now_online and not was_online:
+            record_activity("sanket_power", f"Powered on · online as {presence_name}", channel=sorted(names)[0])
+        elif was_online and not now_online:
+            record_activity("sanket_power", "SanketPTT powered off")
         if names or discover or auto_add:
             hub.ensure()
         hub.expire()

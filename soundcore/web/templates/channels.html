@@ -33,8 +33,11 @@
     </p>
     <p><span>Last audio error</span> {{ audio.snapshot.last_error or audio.error or 'none' }}</p>
     <p><span>SanketPTT</span>
-      {% if sanket.connected %}connected to {{ sanket.broker or sanket.broker_url }}{% else %}not connected{% endif %}
-      {% if sanket.last_error %} — {{ sanket.last_error }}{% endif %}
+      {% if sanket.power == 'online' %}Powered on · online as {{ sanket.presence_name }}
+      {% elif sanket.power == 'reconnecting' %}Reconnecting{% if sanket.last_error %} — {{ sanket.last_error }}{% endif %}
+      {% elif sanket_always_on %}Powered on · waiting to join as {{ sanket_device_name }}
+      {% else %}powered off{% if sanket.last_error %} — {{ sanket.last_error }}{% endif %}
+      {% endif %}
     </p>
   </div>
 </section>
@@ -72,6 +75,13 @@
     <button class="btn ghost" type="submit">{{ 'Auto-add is on' if sanket_auto_add else 'Auto-add is off' }}</button>
   </form>
   <p class="meta">Auto-add is {{ 'on' if sanket_auto_add else 'off' }} (default off). It saves newly heard channels turned off, so the stream cap is unchanged until you enable one.</p>
+  <form method="post" action="{{ url_for('pages.channels_sanket_always_on') }}" class="route-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Device name <input name="device_name" value="{{ sanket_device_name }}" maxlength="40"></label>
+    <label class="check"><input type="checkbox" name="enabled" {% if sanket_always_on %}checked{% endif %}> SanketPTT always on / show as online</label>
+    <button class="btn ghost" type="submit">Save power</button>
+  </form>
+  <p class="meta">Default is on. Enabled channels join the relay when the worker starts and stay online as this name. Floor and audio are never transmitted.</p>
   {% if sanket.channels %}
   <table class="grid">
     <thead><tr><th>Heard on the relay</th><th>Online</th><th>Talking</th><th></th></tr></thead>
@@ -159,6 +169,7 @@
       <span class="meta">Backend {{ channel.audio_backend or 'alsa' }} · Direction {{ 'input' if channel.direction == 'in' else 'output' }}{% if device_key not in audio.available %} · disconnected{% endif %}
         {% if channel.audio_backend == 'sanketptt' %}
           {% set live = sanket.channels.get(device_key.split(':')[-1], {}) if sanket.channels else {} %}
+          {% if sanket.power == 'online' %} · Powered on · online as {{ sanket.presence_name }}{% elif sanket.power == 'reconnecting' %} · Reconnecting{% elif channel.enabled %} · powered off{% endif %}
           {% if live %} · broker {{ sanket.broker or '—' }} · last packet {{ live.last_packet or '—' }} · talker {{ live.talking or live.last_talker or '—' }}{% endif %}
           {% if sanket.last_error %} · {{ sanket.last_error }}{% endif %}
           · <a href="{{ web_url(device_key.split(':')[-1]) }}">Open in SanketPTT</a>

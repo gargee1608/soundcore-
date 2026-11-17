@@ -39,6 +39,8 @@ FLOOR_TIMEOUT_S = 2.5
 PRESENCE_TTL_S = 15.0
 MIN_CLIP_S = 0.4
 MAX_CLIP_S = 60.0
+HEARTBEAT_S = 5.0  # web client HB_MS
+STALE_S = 60.0  # Sanket Edge rebuilds a client with no connection this long
 PRESENCE_WILDCARD = PREFIX + "+/presence/+"
 AUDIO_WILDCARD = PREFIX + "+/audio"
 FLOOR_WILDCARD = PREFIX + "+/floor"
@@ -57,6 +59,33 @@ def clean_channel(value: str) -> str:
     import re
 
     return re.sub(r"[^A-Za-z0-9_-]", "", str(value or ""))[:40]
+
+
+def default_device_name() -> str:
+    """Web name filter: letters, digits, and . _ : - only, at most 40 characters."""
+    import re
+    import socket
+
+    host = socket.gethostname().split(".")[0]
+    raw = f"SoundCore-{host}"
+    cleaned = re.sub(r"[^A-Za-z0-9._:-]", "", raw)[:40]
+    return cleaned or "SoundCore"
+
+
+def load_client_id(data_dir: Path) -> str:
+    """Stable 8-character id, same length the web client uses, kept across restarts."""
+    import random
+    import string
+
+    path = Path(data_dir) / ".sanket_id"
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing[:10]
+    chosen = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(chosen, encoding="utf-8")
+    return chosen
 
 
 def web_url(channel: str) -> str:
@@ -229,6 +258,12 @@ class SanketHub:
         self._was_connected = False
         self._closed = False
         self._thread: threading.Thread | None = None
+        self.presence_enabled = False
+        self.presence_name = ""
+        self.client_id = ""
+        self._last_beat = 0.0
+        self._last_activity = 0.0
+        self.published: list[dict] = []
 
     def ensure(self) -> None:
         """Keep one reconnect loop running. Tests call connect() directly instead."""
@@ -243,7 +278,7 @@ class SanketHub:
             if not self.connected:
                 self.connect()
             time.sleep(self.backoff_s if not self.connected else 1.0)
-            self.expire()
+            self.tick()
 
     @property
     def broker_url(self) -> str:
@@ -252,10 +287,25 @@ class SanketHub:
     def set_channels(self, names: set[str] | list[str]) -> None:
         cleaned = {clean_channel(name) for name in names if clean_channel(name)}
         with self._lock:
-            changed = cleaned != self._channels
+            old = set(self._channels)
+            changed = cleaned != old
             self._channels = cleaned
+        if self.connected and self.presence_enabled:
+            self._clear_presence(old - cleaned)
+            self.beat()
         if changed and self.connected:
             self._sync_subs()
+
+    def set_presence(self, enabled: bool, name: str, client_id: str) -> None:
+        """Listen-only 'POWER ON'. Publishes presence; never floor or audio."""
+        turned_off = self.presence_enabled and not enabled
+        self.presence_enabled = bool(enabled)
+        self.presence_name = (name or "")[:40]
+        self.client_id = (client_id or self.client_id or "")[:10]
+        if turned_off:
+            self._clear_presence(self._channels)
+        elif self.connected and self.presence_enabled:
+            self.beat()
 
     def set_discover(self, enabled: bool) -> None:
         with self._lock:
@@ -299,6 +349,7 @@ class SanketHub:
         client.on_message = self._on_message
         client.on_disconnect = self._on_disconnect
         self._client = client
+        self._install_wills(client)
         try:
             host, port, path, use_tls, username, password = _split_broker(url)
             if hasattr(client, "ws_set_options"):
@@ -318,6 +369,7 @@ class SanketHub:
             self._rotate_broker(failed_before_connect=True)
 
     def close(self) -> None:
+        self._clear_presence(self._channels)
         self._closed = True
         self._drop_client()
         self.connected = False
@@ -348,6 +400,10 @@ class SanketHub:
             "discover": self._discover,
             "subscribed": subscribed,
             "channels": rows,
+            "presence": self.presence_enabled,
+            "presence_name": self.presence_name,
+            "client_id": self.client_id,
+            "power": self.power_state(),
         }
 
     def write_status(self) -> None:
@@ -359,6 +415,62 @@ class SanketHub:
             path.write_text(json.dumps(self.status()), encoding="utf-8")
         except OSError:
             logger.debug("could not write sanket status", exc_info=True)
+
+    def power_state(self) -> str:
+        if not self.presence_enabled:
+            return "off"
+        if self.connected:
+            return "online"
+        return "reconnecting"
+
+    def beat(self) -> None:
+        """Retained presence, same JSON the web client publishes from R.beat."""
+        if not self.presence_enabled or not self.client_id or not self.presence_name:
+            return
+        now_ms = int(self._clock() * 1000)
+        payload = json.dumps({"id": self.client_id, "name": self.presence_name, "ts": now_ms})
+        for channel in sorted(self._channels):
+            self._publish(f"{PREFIX}{channel}/presence/{self.client_id}", payload, retain=True)
+        self._last_beat = self._clock()
+
+    def tick(self) -> None:
+        """Heartbeat every 5s, and a watchdog if the broker goes quiet."""
+        self.expire()
+        now = self._clock()
+        if self.presence_enabled and self.connected and now - self._last_beat >= HEARTBEAT_S:
+            self.beat()
+        if self.connected and self._last_activity and now - self._last_activity > STALE_S:
+            logger.info("sanket: no MQTT activity for %.0fs on %s; forcing reconnect", now - self._last_activity, self.broker_url)
+            self.last_error = "stale connection"
+            self.connected = False
+            self._drop_client()
+            self._rotate_broker(failed_before_connect=False)
+
+    def _install_wills(self, client) -> None:
+        if not self.presence_enabled or not self.client_id or not hasattr(client, "will_set"):
+            return
+        for channel in sorted(self._channels):
+            client.will_set(
+                f"{PREFIX}{channel}/presence/{self.client_id}",
+                b"",
+                qos=0,
+                retain=True,
+            )
+
+    def _publish(self, topic: str, payload, *, retain: bool) -> None:
+        if "/floor" in topic or topic.endswith("/audio") or topic.endswith("/sstv"):
+            raise RuntimeError(f"SanketPTT must not publish {topic}")
+        body = payload if isinstance(payload, (bytes, bytearray)) else str(payload).encode("utf-8")
+        self.published.append({"topic": topic, "payload": bytes(body), "retain": retain})
+        client = self._client
+        if client is not None and hasattr(client, "publish"):
+            client.publish(topic, body, qos=0, retain=retain)
+
+    def _clear_presence(self, channels) -> None:
+        if not self.client_id:
+            return
+        for channel in sorted(channels):
+            self._publish(f"{PREFIX}{channel}/presence/{self.client_id}", b"", retain=True)
 
     def subscriptions(self) -> list[str]:
         topics = []
@@ -388,11 +500,15 @@ class SanketHub:
         self.backoff_s = 0.3
         self._subs = set()
         self._sync_subs()
+        self._last_activity = self._clock()
         logger.info(
             "sanket: connected broker=%s subscriptions=%s",
             self.broker_url,
             ", ".join(self.subscriptions()) or "(none)",
         )
+        if self.presence_enabled:
+            self.beat()
+            logger.info("sanket: powered on as %s id=%s", self.presence_name, self.client_id)
         self.write_status()
 
     def _on_disconnect(self, client, userdata, flags=None, rc=None, props=None):
@@ -436,6 +552,7 @@ class SanketHub:
     def _handle(self, topic: str, payload: bytes) -> None:
         if not topic.startswith(PREFIX):
             return
+        self._last_activity = self._clock()
         rest = topic[len(PREFIX) :]
         channel, _, sub = rest.partition("/")
         channel = clean_channel(channel)
