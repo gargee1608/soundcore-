@@ -92,7 +92,10 @@ def _audio_panel(backend, settings, channels):
     sinks = [device for device in devices if device.backend == "pipewire" and device.direction == "out"]
     sources = [device for device in devices if device.backend == "pipewire" and device.direction == "in"]
     bluetooth = [device for device in sinks if device.kind == "bluetooth"]
-    available = {device.id for device in devices if device.available}
+    worker_ids = set(snapshot.get("available_device_ids") or [])
+    available = {device.id for device in devices if device.available} | worker_ids
+    # An empty failed scan must not mark every saved ALSA/HDMI row disconnected.
+    scanned = bool(devices) or bool(worker_ids)
     return {
         "devices": devices,
         "fresh": fresh,
@@ -103,6 +106,7 @@ def _audio_panel(backend, settings, channels):
         "bluetooth": bluetooth,
         "bluetooth_connected": bool(bluetooth),
         "available": available,
+        "scanned": scanned,
         "input_backends": sorted({device.backend for device in devices if device.direction == "in"}),
         "output_backends": sorted({device.backend for device in devices if device.direction == "out"}),
     }

@@ -166,7 +166,7 @@
     <label>Name <input name="name" value="{{ channel.name }}" required></label>
     <label>Device
       <input name="alsa_device" value="{{ device_key }}" required>
-      <span class="meta">Backend {{ channel.audio_backend or 'alsa' }} · Direction {{ 'input' if channel.direction == 'in' else 'output' }}{% if device_key not in audio.available %} · disconnected{% endif %}
+      <span class="meta">Backend {{ channel.audio_backend or 'alsa' }} · Direction {{ 'input' if channel.direction == 'in' else 'output' }}{% if audio.scanned and channel.audio_backend != 'sanketptt' and device_key not in audio.available %} · disconnected{% endif %}
         {% if channel.audio_backend == 'sanketptt' %}
           {% set live = sanket.channels.get(device_key.split(':')[-1], {}) if sanket.channels else {} %}
           {% if sanket.power == 'online' %} · Powered on · online as {{ sanket.presence_name }}{% elif sanket.power == 'reconnecting' %} · Reconnecting{% elif channel.enabled %} · powered off{% endif %}

@@ -41,6 +41,7 @@ MIN_CLIP_S = 0.4
 MAX_CLIP_S = 60.0
 HEARTBEAT_S = 5.0  # web client HB_MS
 STALE_S = 60.0  # Sanket Edge rebuilds a client with no connection this long
+HANDSHAKE_S = 15.0  # wait for TLS and CONNACK before dropping the socket
 PRESENCE_WILDCARD = PREFIX + "+/presence/+"
 AUDIO_WILDCARD = PREFIX + "+/audio"
 FLOOR_WILDCARD = PREFIX + "+/floor"
@@ -263,6 +264,9 @@ class SanketHub:
         self.client_id = ""
         self._last_beat = 0.0
         self._last_activity = 0.0
+        self._connecting = False
+        self._connect_started = 0.0
+        self.connect_calls = 0
         self.published: list[dict] = []
 
     def ensure(self) -> None:
@@ -275,10 +279,15 @@ class SanketHub:
 
     def _run(self) -> None:
         while not self._closed:
-            if not self.connected:
+            if not self.connected and not self._handshake_pending():
                 self.connect()
-            time.sleep(self.backoff_s if not self.connected else 1.0)
+            time.sleep(1.0 if (self.connected or self._handshake_pending()) else min(self.backoff_s, 1.0))
             self.tick()
+
+    def _handshake_pending(self) -> bool:
+        if self.connected or not self._connecting:
+            return False
+        return (self._clock() - self._connect_started) < HANDSHAKE_S
 
     @property
     def broker_url(self) -> str:
@@ -332,22 +341,36 @@ class SanketHub:
             return now - float(state.floor.get("seen") or 0) <= FLOOR_TIMEOUT_S
 
     def connect(self) -> None:
-        """Open the current broker. Tests pass mqtt_factory; production uses paho."""
-        self._closed = False
+        """Open the current broker. A handshake already in flight is left alone."""
+        if self._closed or self.connected:
+            return
+        if self._handshake_pending():
+            return
+        if self._connecting:
+            logger.warning(
+                "sanket: handshake to %s exceeded %.0fs with no CONNACK; rotating broker",
+                self.broker_url,
+                HANDSHAKE_S,
+            )
+            self._rotate_broker(failed_before_connect=True)
         self._drop_client()
+        self.connect_calls += 1
         url = self.broker_url
         logger.info("sanket: connecting to broker %s", url)
         factory = self._factory or _paho_factory
         try:
             client = factory(url)
         except Exception as exc:
+            self._connecting = False
             self.last_error = str(exc)
-            logger.info("sanket: broker %s failed (%s); next %s", url, exc, BROKERS[(self.broker_index + 1) % len(BROKERS)])
+            logger.warning("sanket: broker %s failed to build a client: %s", url, exc, exc_info=True)
             self._rotate_broker(failed_before_connect=True)
             return
         client.on_connect = self._on_connect
         client.on_message = self._on_message
         client.on_disconnect = self._on_disconnect
+        if hasattr(client, "enable_logger"):
+            client.enable_logger(logger)
         self._client = client
         self._install_wills(client)
         try:
@@ -360,12 +383,16 @@ class SanketHub:
                 client.username_pw_set(username, password or "")
             if hasattr(client, "reconnect_delay_set"):
                 client.reconnect_delay_set(1, 30)
+            self._connecting = True
+            self._connect_started = self._clock()
             client.connect_async(host, port, keepalive=20)
             if hasattr(client, "loop_start"):
                 client.loop_start()
         except Exception as exc:
+            self._connecting = False
             self.last_error = str(exc)
             self.connected = False
+            logger.warning("sanket: connect to %s failed: %s", url, exc, exc_info=True)
             self._rotate_broker(failed_before_connect=True)
 
     def close(self) -> None:
@@ -488,19 +515,29 @@ class SanketHub:
         return topics
 
     def _on_connect(self, client, userdata, flags, rc, props=None):
-        code = getattr(rc, "value", rc)
-        if code not in (0, None):
-            self.last_error = f"broker refused: {rc}"
+        try:
+            code = getattr(rc, "value", rc)
+            if code not in (0, None):
+                self._connecting = False
+                self.last_error = f"broker refused: {rc}"
+                self.connected = False
+                logger.warning("sanket: on_connect refused reason=%s flags=%s broker=%s", rc, flags, self.broker_url)
+                self._rotate_broker(failed_before_connect=True)
+                return
+            self._connecting = False
+            self.connected = True
+            self._was_connected = True
+            self.last_error = ""
+            self.backoff_s = 0.3
+            self._subs = set()
+            self._sync_subs()
+            self._last_activity = self._clock()
+            logger.info("sanket: on_connect reason=%s broker=%s", rc, self.broker_url)
+        except Exception:
+            self._connecting = False
             self.connected = False
-            self._rotate_broker(failed_before_connect=True)
+            logger.warning("sanket: on_connect callback failed", exc_info=True)
             return
-        self.connected = True
-        self._was_connected = True
-        self.last_error = ""
-        self.backoff_s = 0.3
-        self._subs = set()
-        self._sync_subs()
-        self._last_activity = self._clock()
         logger.info(
             "sanket: connected broker=%s subscriptions=%s",
             self.broker_url,
@@ -512,13 +549,25 @@ class SanketHub:
         self.write_status()
 
     def _on_disconnect(self, client, userdata, flags=None, rc=None, props=None):
-        if self.connected:
-            self.last_error = f"disconnected ({rc})"
-        self.connected = False
-        self.reconnects += 1
-        if not self._closed:
-            self._rotate_broker(failed_before_connect=False)
-        self.write_status()
+        try:
+            # _drop_client clears _client before disconnect, so that callback
+            # must not rotate or cancel the handshake that replaces it.
+            if client is not self._client:
+                return
+            if self._connecting and not self.connected:
+                logger.warning("sanket: on_disconnect during handshake reason=%s flags=%s", rc, flags)
+                return
+            if self.connected:
+                self.last_error = f"disconnected ({rc})"
+            self._connecting = False
+            self.connected = False
+            self.reconnects += 1
+            logger.warning("sanket: on_disconnect reason=%s flags=%s broker=%s", rc, flags, self.broker_url)
+            if not self._closed:
+                self._rotate_broker(failed_before_connect=False)
+            self.write_status()
+        except Exception:
+            logger.warning("sanket: on_disconnect callback failed", exc_info=True)
 
     def _on_message(self, client, userdata, message):
         topic = getattr(message, "topic", "")
@@ -672,6 +721,7 @@ class SanketHub:
     def _drop_client(self) -> None:
         client = self._client
         self._client = None
+        self._connecting = False
         self._subs = set()
         if client is None:
             return
@@ -731,10 +781,13 @@ def _paho_factory(url: str):
     import paho.mqtt.client as mqtt
 
     parsed_scheme = url.split(":", 1)[0]
+    # VERSION2 callbacks are (client, userdata, flags, reason_code, properties).
+    # reconnect_on_failure stays off so this hub, not paho, owns the retry.
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
         client_id=f"soundcore_{int(time.time())}",
         transport="websockets" if parsed_scheme in {"ws", "wss"} else "tcp",
         clean_session=True,
+        reconnect_on_failure=False,
     )
     return client
