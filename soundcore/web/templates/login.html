@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Sign in · SoundCore{% endblock %}
+{% block content %}
+<main class="login-screen">
+  <section class="login-card">
+    <p class="eyebrow">SoundCore</p>
+    <h1>Sign in to the desk</h1>
+    <p class="lede">Each radio, FM receiver, handheld, and 3.5 mm input stays on its own channel. Recording does not stop while you listen or relay.</p>
+    <form method="post" action="{{ url_for('pages.login_post') }}" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ request.args.get('next', '') }}">
+      <label>Email
+        <input type="email" name="email" autocomplete="username" required autofocus>
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn solid" type="submit">Enter console</button>
+    </form>
+  </section>
+</main>
+{% endblock %}

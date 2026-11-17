@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Routing · SoundCore{% endblock %}
+{% block eyebrow %}Relay{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Input to output</h1>
+    <p class="lede">A route copies the same samples that are being written to disk. Recording does not pause while a speaker or headset is fed.</p>
+  </div>
+</section>
+
+<section class="panel">
+  {% if not inputs or not outputs %}
+  <div class="empty slim">
+    <h2>Need both sides</h2>
+    <p>Add at least one input channel and one output channel before building a route.</p>
+  </div>
+  {% else %}
+  <form method="post" action="{{ url_for('pages.routing_save') }}" class="route-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Input
+      <select name="input_channel_id">
+        {% for channel in inputs %}<option value="{{ channel.id }}">{{ channel.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Output
+      <select name="output_channel_id">
+        {% for channel in outputs %}<option value="{{ channel.id }}">{{ channel.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
+    <button class="btn solid" type="submit">Save route</button>
+  </form>
+  {% endif %}
+
+  {% if routes %}
+  <table class="grid">
+    <thead><tr><th>Input</th><th>Output</th><th>State</th><th></th></tr></thead>
+    <tbody>
+      {% for route in routes %}
+      <tr>
+        <td>{{ names[route.input_channel_id].name if route.input_channel_id in names else route.input_channel_id }}</td>
+        <td>{{ names[route.output_channel_id].name if route.output_channel_id in names else route.output_channel_id }}</td>
+        <td>{{ 'On' if route.enabled else 'Off' }}</td>
+        <td>
+          <form method="post" action="{{ url_for('pages.routing_delete', route_id=route.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn ghost danger" type="submit">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif inputs and outputs %}
+  <p class="muted">No routes yet. Outputs stay quiet until you add one.</p>
+  {% endif %}
+</section>
+{% endblock %}

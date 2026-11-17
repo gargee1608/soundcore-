@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Desk · SoundCore{% endblock %}
+{% block eyebrow %}Live desk{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Channels on the air</h1>
+    <p class="lede">Enabled inputs record continuously. Pick one to listen in the browser, or route it to a USB output without stopping the file.</p>
+  </div>
+  <a class="btn solid" href="{{ url_for('pages.channels') }}">Configure channels</a>
+</section>
+
+<div id="banner" class="banner {% if status.capacity.level == 'ok' and status.disk.level == 'ok' %}hidden{% endif %}" data-level="{% if status.disk.level == 'critical' or status.capacity.level == 'blocked' %}critical{% else %}warning{% endif %}">
+  <strong id="banner-title">Performance</strong>
+  <span id="banner-text">
+    {% if status.disk.level != 'ok' %}{{ status.disk.message }}{% endif %}
+    {% if status.capacity.level != 'ok' %} {{ status.capacity.message }}{% endif %}
+  </span>
+</div>
+
+<section class="stats" id="stats">
+  <article>
+    <span>Active streams</span>
+    <strong id="stat-streams">{{ status.capacity.active }}<small>/ {{ status.capacity.cap }}</small></strong>
+  </article>
+  <article>
+    <span>Open files</span>
+    <strong id="stat-open">{{ status.counts.open_recordings }}</strong>
+  </article>
+  <article>
+    <span>Disk free</span>
+    <strong id="stat-free">{{ (status.disk.free_ratio * 100)|round(0) }}<small>%</small></strong>
+  </article>
+  <article>
+    <span>Transcripts waiting</span>
+    <strong id="stat-tx">{{ status.counts.pending_transcriptions }}</strong>
+  </article>
+</section>
+
+{% set inputs = status.channels | selectattr('direction', 'equalto', 'in') | list %}
+{% if not inputs %}
+<section class="empty">
+  <h2>No input channels yet</h2>
+  <p>Discover the USB cards and the 3.5 mm input, name each one, and enable it. SoundCore will not invent a recording until you do.</p>
+  <a class="btn solid" href="{{ url_for('pages.channels') }}">Add a channel</a>
+</section>
+{% else %}
+<section class="channel-grid" id="channel-grid">
+  {% for channel in inputs %}
+  {% set route = (status.routes | selectattr('input_id', 'equalto', channel.id) | list | first) %}
+  <article class="channel" data-channel-id="{{ channel.id }}">
+    <header>
+      <div>
+        <p class="kind">{{ channel.kind }}</p>
+        <h2>{{ channel.name }}</h2>
+      </div>
+      <span class="pill {% if channel.enabled %}rec{% else %}idle{% endif %}" data-pill="{{ channel.id }}">{% if channel.enabled %}Rec{% else %}Off{% endif %}</span>
+    </header>
+    <p class="meta"><code>{{ channel.device }}</code> · {{ channel.sample_rate }} Hz · {{ '%+.1f'|format(channel.gain_db) }} dB</p>
+    <div class="meter" aria-hidden="true"><span data-meter="{{ channel.id }}" style="width: {{ [channel.level * 140, 100]|min }}%"></span></div>
+    <footer>
+      <button type="button" class="btn listen" data-listen="{{ channel.id }}" {% if not channel.enabled %}disabled{% endif %}>Listen</button>
+      <span class="route" data-route="{{ channel.id }}">{% if route %}Relay → {{ route.output }}{% else %}No relay{% endif %}</span>
+    </footer>
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section class="split">
+  <div>
+    <h2>Latest files</h2>
+    {% if recent %}
+    <ul class="file-list">
+      {% for rec in recent %}
+      <li>
+        <div>
+          <strong>{{ names.get(rec.channel_id, 'Channel') }}</strong>
+          <span>{{ rec.filename }}</span>
+        </div>
+        <em class="state {{ rec.storage_state }}">{{ rec.storage_state.replace('_', ' ') }}</em>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">Files appear here as soon as a chunk opens. The first rotation is about a minute after a channel is enabled.</p>
+    {% endif %}
+    <a class="text-link" href="{{ url_for('pages.recordings') }}">All recordings</a>
+  </div>
+  <div>
+    <h2>Alerts</h2>
+    {% if status.alerts %}
+    <ul class="alert-list" id="alert-list">
+      {% for alert in status.alerts %}
+      <li class="{{ alert.level }}"><strong>{{ alert.kind }}</strong> {{ alert.message }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted" id="alert-empty">No unacknowledged alerts. Disk, S3, and transcription problems land here.</p>
+    <ul class="alert-list" id="alert-list" hidden></ul>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Recordings · SoundCore{% endblock %}
+{% block eyebrow %}Library{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Recordings</h1>
+    <p class="lede">Files are named with the channel, the local time the chunk opened, and an 8-character id. Playing a file updates last-access, which resets the seven-day offload clock.</p>
+  </div>
+  <form method="get" class="filter">
+    <label>Channel
+      <select name="channel_id" onchange="this.form.submit()">
+        <option value="">All</option>
+        {% for channel in channels %}
+        <option value="{{ channel.id }}" {% if channel_id == channel.id %}selected{% endif %}>{{ channel.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</section>
+
+{% if not recordings %}
+<section class="empty">
+  <h2>No files yet</h2>
+  <p>Enable an input channel. An open chunk shows up here within a second, and a closed WAV follows at the end of the chunk.</p>
+</section>
+{% else %}
+<div class="recording-list">
+  {% for rec in recordings %}
+  {% set tx = transcripts.get(rec.id) %}
+  <article class="recording">
+    <header>
+      <div>
+        <p class="kind">{{ names.get(rec.channel_id, 'Channel') }}</p>
+        <h2>{{ rec.filename }}</h2>
+      </div>
+      <span class="pill {{ rec.storage_state }}">{{ rec.storage_state.replace('_', ' ') }}</span>
+    </header>
+    <p class="meta">
+      Started {{ rec.started_at|hm }}
+      {% if rec.duration_s %} · {{ '%.0f'|format(rec.duration_s) }}s{% endif %}
+      {% if rec.size_bytes %} · {{ (rec.size_bytes / 1024)|round(0) }} KB{% endif %}
+    </p>
+    {% if rec.storage_state == 'writing' %}
+    <p class="muted">Still writing this chunk.</p>
+    {% elif rec.storage_state == 'local_deleted_remote_only' %}
+    <p class="muted">Local copy has been removed after a verified upload.</p>
+    {% elif rec.local_path %}
+    <audio controls preload="none" src="{{ url_for('recordings_api.audio', recording_id=rec.id) }}"></audio>
+    {% endif %}
+    <div class="transcript">
+      {% if tx and tx.status == 'done' %}
+        <p>{{ tx.text }}</p>
+      {% elif tx %}
+        <p class="muted">Transcript {{ tx.status }}{% if tx.error %} — {{ tx.error }}{% endif %}{% if tx.attempt_count %} · attempt {{ tx.attempt_count }}{% endif %}</p>
+      {% else %}
+        <p class="muted">No transcript queued.</p>
+      {% endif %}
+      {% if rec.storage_state != 'writing' %}
+      <form method="post" action="{{ url_for('pages.queue_transcription', recording_id=rec.id) }}" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn ghost" type="submit">Queue transcript</button>
+      </form>
+      {% endif %}
+    </div>
+  </article>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

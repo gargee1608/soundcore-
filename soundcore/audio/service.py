@@ -1,0 +1,353 @@
+"""Per-channel capture threads: record, relay, and publish live audio together."""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from soundcore.audio.naming import build_recording_relative_path, new_unique_id
+from soundcore.audio.pcm import pcm_rms
+from soundcore.audio.recorder import WavRecorder, fanout
+from soundcore.db import session_scope
+from soundcore.models import Channel, Recording, Route, StorageState, Stream, utcnow
+from soundcore.notify import notify
+from soundcore.settings_store import load_runtime
+from soundcore.storage.guard import admission, measure_disk
+from soundcore.transcription.worker import enqueue_transcription
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ChannelSpec:
+    id: int
+    name: str
+    slug: str
+    alsa_device: str
+    sample_rate: int
+    gain_db: float
+    stream_id: int | None
+
+    @property
+    def signature(self) -> tuple:
+        return (self.alsa_device, self.sample_rate, round(self.gain_db, 2))
+
+
+class AudioService:
+    def __init__(self, settings, backend, bus):
+        self.settings = settings
+        self.backend = backend
+        self.bus = bus
+        self._levels: dict[int, float] = {}
+        self._level_lock = threading.Lock()
+        self._route_lock = threading.Lock()
+        self._routes: dict[int, list[tuple[str, int]]] = {}
+        self._stop = threading.Event()
+        self._workers: dict[int, tuple[tuple, threading.Event, threading.Thread]] = {}
+        self._thread: threading.Thread | None = None
+        self._runtime_cache = None
+        self._runtime_at = 0.0
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._supervise, name="soundcore-audio", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        workers = list(self._workers.values())
+        for _sig, stop, _thread in workers:
+            stop.set()
+        for _sig, _stop_evt, thread in workers:
+            thread.join(timeout=3)
+        self._workers.clear()
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def level(self, channel_id: int) -> float:
+        with self._level_lock:
+            return self._levels.get(channel_id, 0.0)
+
+    def levels(self) -> dict[int, float]:
+        with self._level_lock:
+            return dict(self._levels)
+
+    def _set_level(self, channel_id: int, value: float) -> None:
+        with self._level_lock:
+            self._levels[channel_id] = value
+
+    def _supervise(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._reconcile()
+            except Exception:
+                logger.exception("audio supervisor failed")
+            self._stop.wait(2)
+
+    def _reconcile(self) -> None:
+        with session_scope() as session:
+            rows = session.query(Channel).filter_by(direction="in", enabled=True).all()
+            streams = {stream.channel_id: stream.id for stream in session.query(Stream).all()}
+            desired = {
+                row.id: ChannelSpec(
+                    id=row.id,
+                    name=row.name,
+                    slug=row.slug,
+                    alsa_device=row.alsa_device,
+                    sample_rate=row.sample_rate,
+                    gain_db=row.gain_db,
+                    stream_id=streams.get(row.id),
+                )
+                for row in rows
+            }
+            route_rows = session.query(Route).filter_by(enabled=True).all()
+            outputs = {
+                row.id: row
+                for row in session.query(Channel).filter_by(direction="out", enabled=True).all()
+            }
+            routes: dict[int, list[tuple[str, int]]] = {}
+            for route in route_rows:
+                output = outputs.get(route.output_channel_id)
+                if output is None:
+                    continue
+                routes.setdefault(route.input_channel_id, []).append((output.alsa_device, output.sample_rate))
+        with self._route_lock:
+            self._routes = routes
+
+        stale = [channel_id for channel_id in self._workers if channel_id not in desired]
+        for channel_id in stale:
+            _sig, stop, thread = self._workers.pop(channel_id)
+            stop.set()
+            thread.join(timeout=3)
+            self._set_level(channel_id, 0.0)
+
+        for channel_id, spec in desired.items():
+            current = self._workers.get(channel_id)
+            if current and (current[0] != spec.signature or not current[2].is_alive()):
+                _sig, stop, thread = self._workers.pop(channel_id)
+                stop.set()
+                thread.join(timeout=3)
+                current = None
+            if current is None:
+                stop = threading.Event()
+                thread = threading.Thread(
+                    target=self._run_channel,
+                    args=(spec, stop),
+                    name=f"soundcore-ch-{spec.slug}",
+                    daemon=True,
+                )
+                self._workers[channel_id] = (spec.signature, stop, thread)
+                thread.start()
+
+    def _routes_for(self, channel_id: int) -> list[tuple[str, int]]:
+        with self._route_lock:
+            return list(self._routes.get(channel_id, []))
+
+    def _run_channel(self, spec: ChannelSpec, stop: threading.Event) -> None:
+        capture = self.backend.open_capture(spec.alsa_device, spec.sample_rate, spec.gain_db)
+        try:
+            capture.start()
+        except Exception:
+            logger.exception("capture failed to start for %s", spec.alsa_device)
+            return
+        playbacks = []
+        open_ids: list[str] = []
+        writer: WavRecorder | None = None
+        recording_id: int | None = None
+        chunk_started = 0.0
+        last_disk_alert = 0.0
+        frame_seconds = 0.02
+        frames = max(1, int(spec.sample_rate * frame_seconds))
+        # Pace to the device clock. ALSA reads already block; the simulated
+        # backend returns immediately, and without this a chunk fills with
+        # minutes of audio in a few seconds.
+        next_tick = time.monotonic()
+        try:
+            while not stop.is_set():
+                self._sync_playbacks(spec, playbacks, open_ids)
+                runtime = self._runtime()
+                now_mono = time.monotonic()
+                rotate = writer is None or (now_mono - chunk_started) >= runtime.chunk_seconds
+                if rotate:
+                    blocked = self._disk_blocks_new_file()
+                    if blocked and writer is not None:
+                        if now_mono - last_disk_alert > 60:
+                            last_disk_alert = now_mono
+                            self._alert(
+                                "warning",
+                                "disk_reserve",
+                                f"{spec.name} is still recording into the open file because free space is at the 5% reserve.",
+                            )
+                    elif blocked and writer is None:
+                        if now_mono - last_disk_alert > 60:
+                            last_disk_alert = now_mono
+                            self._alert(
+                                "error",
+                                "disk_reserve",
+                                f"Not opening a new file for {spec.name}. Less than 5% of the volume is free.",
+                            )
+                        stop.wait(1)
+                        continue
+                    else:
+                        self._finalize(recording_id, writer)
+                        writer, recording_id = self._open_chunk(spec, runtime)
+                        chunk_started = now_mono
+                        if writer is None:
+                            stop.wait(1)
+                            continue
+                try:
+                    pcm = capture.read(frames)
+                except Exception:
+                    logger.exception("read failed on %s", spec.alsa_device)
+                    stop.wait(1)
+                    continue
+                if not pcm:
+                    stop.wait(0.2)
+                    continue
+                fanout(pcm, writer, list(playbacks), self.bus, spec.id, spec.sample_rate)
+                self._set_level(spec.id, pcm_rms(pcm))
+                next_tick += frame_seconds
+                delay = next_tick - time.monotonic()
+                if delay > 0:
+                    stop.wait(delay)
+                else:
+                    next_tick = time.monotonic()
+        finally:
+            self._finalize(recording_id, writer)
+            for playback in playbacks:
+                try:
+                    playback.stop()
+                except Exception:
+                    logger.debug("playback stop failed", exc_info=True)
+            try:
+                capture.stop()
+            except Exception:
+                logger.debug("capture stop failed", exc_info=True)
+            self._set_level(spec.id, 0.0)
+
+    def _sync_playbacks(self, spec: ChannelSpec, playbacks: list, open_ids: list[str]) -> None:
+        desired = self._routes_for(spec.id)
+        desired_ids = [device_id for device_id, _rate in desired]
+        if desired_ids == open_ids:
+            return
+        for playback in playbacks:
+            try:
+                playback.stop()
+            except Exception:
+                logger.debug("playback stop failed", exc_info=True)
+        playbacks.clear()
+        open_ids.clear()
+        for device_id, rate in desired:
+            playback = self.backend.open_playback(device_id, rate or spec.sample_rate)
+            try:
+                playback.start()
+            except Exception:
+                logger.exception("playback failed to start for %s", device_id)
+                continue
+            playbacks.append(playback)
+            open_ids.append(device_id)
+
+    def _runtime(self):
+        now = time.monotonic()
+        if self._runtime_cache is not None and now - self._runtime_at < 2:
+            return self._runtime_cache
+        with session_scope() as session:
+            runtime = load_runtime(session, self.settings)
+        self._runtime_cache = runtime
+        self._runtime_at = now
+        return runtime
+
+    def _disk_blocks_new_file(self) -> bool:
+        runtime = self._runtime()
+        usage = measure_disk(self.settings.data_dir)
+        return admission(usage, reserve_ratio=runtime.free_reserve_ratio) == "refuse"
+
+    def _alert(self, level: str, kind: str, message: str) -> None:
+        try:
+            with session_scope() as session:
+                runtime = load_runtime(session, self.settings)
+                bridge = _NotifySettings(self.settings, runtime)
+                notify(session, bridge, level, kind, message)
+        except Exception:
+            logger.exception("failed to record audio alert")
+
+    def _open_chunk(self, spec: ChannelSpec, runtime) -> tuple[WavRecorder | None, int | None]:
+        try:
+            tz = ZoneInfo(runtime.timezone)
+        except Exception:
+            tz = timezone.utc
+        local_now = datetime.now(tz)
+        started = local_now.astimezone(timezone.utc)
+        unique_id = new_unique_id()
+        relative = build_recording_relative_path(spec.slug, local_now, unique_id)
+        path = Path(self.settings.data_dir) / relative
+        try:
+            with session_scope() as session:
+                recording = Recording(
+                    channel_id=spec.id,
+                    stream_id=spec.stream_id,
+                    filename=path.name,
+                    local_path=relative,
+                    started_at=started,
+                    storage_state=StorageState.WRITING,
+                )
+                session.add(recording)
+                session.flush()
+                recording_id = recording.id
+            writer = WavRecorder(path, spec.sample_rate)
+            writer.open()
+            return writer, recording_id
+        except Exception:
+            logger.exception("could not open recording for %s", spec.slug)
+            return None, None
+
+    def _finalize(self, recording_id: int | None, writer: WavRecorder | None) -> None:
+        if writer is None or recording_id is None:
+            return
+        try:
+            stats = writer.close()
+        except Exception:
+            logger.exception("failed to close wav for recording %s", recording_id)
+            return
+        try:
+            with session_scope() as session:
+                recording = session.get(Recording, recording_id)
+                if recording is None:
+                    return
+                if stats["frames"] <= 0:
+                    path = Path(self.settings.data_dir) / (recording.local_path or "")
+                    if path.is_file():
+                        path.unlink()
+                    session.delete(recording)
+                    return
+                ended = utcnow()
+                recording.ended_at = ended
+                recording.duration_s = stats["duration_s"]
+                recording.size_bytes = stats["size_bytes"]
+                recording.checksum = stats["checksum"]
+                recording.last_accessed_at = ended
+                recording.storage_state = StorageState.LOCAL_ONLY
+                runtime = load_runtime(session, self.settings)
+                if runtime.transcribe_enabled:
+                    enqueue_transcription(session, recording)
+        except Exception:
+            logger.exception("failed to finalize recording %s", recording_id)
+
+
+class _NotifySettings:
+    def __init__(self, settings, runtime):
+        self.smtp_host = settings.smtp_host
+        self.smtp_port = settings.smtp_port
+        self.smtp_user = settings.smtp_user
+        self.smtp_password = settings.smtp_password
+        self.smtp_from = settings.smtp_from
+        self.smtp_tls = settings.smtp_tls
+        self.notify_email = runtime.notify_email
+        self.notify_webhook = runtime.notify_webhook

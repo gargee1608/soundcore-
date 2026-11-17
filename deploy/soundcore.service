@@ -1,0 +1,19 @@
+[Unit]
+Description=SoundCore web console
+After=network-online.target soundcore-worker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=soundcore
+Group=soundcore
+WorkingDirectory=/opt/soundcore
+EnvironmentFile=/etc/soundcore/soundcore.env
+ExecStart=/opt/soundcore/.venv/bin/python -m soundcore.server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,301 @@
+from flask import (
+    Blueprint,
+    current_app,
+    flash,
+    g,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    url_for,
+)
+
+from soundcore.auth import authenticate, login_required, login_user, logout_user
+from soundcore.maintenance import run_guard
+from soundcore.models import Channel, Event, Recording, Route, Transcription, utcnow
+from soundcore.ops import OpsError, delete_channel, save_channel, save_route
+from soundcore.transcription.worker import enqueue_transcription
+from soundcore.settings_store import load_runtime, set_setting
+from soundcore.status import console_status
+from soundcore.transfer import build_export_zip, import_zip
+import io
+
+bp = Blueprint("pages", __name__)
+
+
+@bp.get("/login")
+def login():
+    if g.get("current_user"):
+        return redirect(url_for("pages.dashboard"))
+    return render_template("login.html")
+
+
+@bp.post("/login")
+def login_post():
+    user = authenticate(g.db, request.form.get("email", ""), request.form.get("password", ""))
+    if user is None:
+        flash("That email or password does not match.", "error")
+        return render_template("login.html"), 401
+    login_user(user)
+    nxt = request.form.get("next") or ""
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = url_for("pages.dashboard")
+    return redirect(nxt)
+
+
+@bp.post("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("pages.login"))
+
+
+@bp.get("/")
+@login_required
+def dashboard():
+    status = console_status(g.db, current_app.config["SETTINGS"], current_app.extensions.get("audio"))
+    recent = g.db.query(Recording).order_by(Recording.started_at.desc()).limit(6).all()
+    names = {row.id: row.name for row in g.db.query(Channel).all()}
+    return render_template("dashboard.html", status=status, recent=recent, names=names)
+
+
+@bp.get("/channels")
+@login_required
+def channels():
+    backend = current_app.extensions["audio_backend"]
+    devices = backend.list_devices()
+    rows = g.db.query(Channel).order_by(Channel.direction, Channel.id).all()
+    known = {row.alsa_device for row in rows}
+    fresh = [device for device in devices if device.id not in known]
+    settings = current_app.config["SETTINGS"]
+    return render_template(
+        "channels.html",
+        channels=rows,
+        fresh=fresh,
+        rates=settings.allowed_sample_rates,
+    )
+
+
+@bp.post("/channels")
+@login_required
+def channels_save():
+    settings = current_app.config["SETTINGS"]
+    channel_id = request.form.get("channel_id")
+    try:
+        save_channel(
+            g.db,
+            settings,
+            channel_id=int(channel_id) if channel_id else None,
+            name=request.form.get("name", ""),
+            alsa_device=request.form.get("alsa_device", ""),
+            sample_rate=int(request.form.get("sample_rate") or settings.default_sample_rate),
+            gain_db=float(request.form.get("gain_db") or 0),
+            enabled=request.form.get("enabled") == "on",
+            direction=request.form.get("direction") or "in",
+            device_kind=request.form.get("device_kind") or "usb",
+            usb_id=request.form.get("usb_id") or None,
+            actor=g.current_user.email,
+        )
+        flash("Channel saved.", "ok")
+    except (OpsError, ValueError) as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.post("/channels/<int:channel_id>/delete")
+@login_required
+def channels_delete(channel_id: int):
+    try:
+        result = delete_channel(g.db, channel_id)
+    except OpsError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("pages.channels"))
+    if result == "disabled":
+        flash("This channel has recordings, so it was disabled instead of deleted.", "ok")
+    else:
+        flash("Channel removed.", "ok")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.get("/routing")
+@login_required
+def routing():
+    inputs = g.db.query(Channel).filter_by(direction="in").order_by(Channel.name).all()
+    outputs = g.db.query(Channel).filter_by(direction="out").order_by(Channel.name).all()
+    routes = g.db.query(Route).order_by(Route.id).all()
+    names = {row.id: row for row in inputs + outputs}
+    return render_template("routing.html", inputs=inputs, outputs=outputs, routes=routes, names=names)
+
+
+@bp.post("/routing")
+@login_required
+def routing_save():
+    try:
+        save_route(
+            g.db,
+            int(request.form["input_channel_id"]),
+            int(request.form["output_channel_id"]),
+            enabled=request.form.get("enabled", "on") == "on",
+        )
+        flash("Route saved. Audio keeps recording while it is relayed.", "ok")
+    except (OpsError, KeyError, ValueError) as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("pages.routing"))
+
+
+@bp.post("/routing/<int:route_id>/delete")
+@login_required
+def routing_delete(route_id: int):
+    route = g.db.get(Route, route_id)
+    if route is not None:
+        g.db.delete(route)
+        flash("Route removed.", "ok")
+    return redirect(url_for("pages.routing"))
+
+
+@bp.get("/recordings")
+@login_required
+def recordings():
+    channel_id = request.args.get("channel_id", type=int)
+    query = g.db.query(Recording).order_by(Recording.started_at.desc())
+    if channel_id:
+        query = query.filter(Recording.channel_id == channel_id)
+    rows = query.limit(100).all()
+    channels = g.db.query(Channel).filter_by(direction="in").order_by(Channel.name).all()
+    names = {row.id: row.name for row in channels}
+    ids = [row.id for row in rows] or [0]
+    transcripts = {
+        row.recording_id: row for row in g.db.query(Transcription).filter(Transcription.recording_id.in_(ids)).all()
+    }
+    return render_template(
+        "recordings.html",
+        recordings=rows,
+        channels=channels,
+        names=names,
+        transcripts=transcripts,
+        channel_id=channel_id,
+    )
+
+
+@bp.post("/recordings/<int:recording_id>/transcribe")
+@login_required
+def queue_transcription(recording_id: int):
+    recording = g.db.get(Recording, recording_id)
+    if recording is None:
+        flash("That recording is gone.", "error")
+    elif recording.storage_state == "writing":
+        flash("This chunk is still open. Transcription starts after it closes.", "error")
+    else:
+        enqueue_transcription(g.db, recording)
+        flash("Transcription queued.", "ok")
+    return redirect(url_for("pages.recordings"))
+
+
+@bp.get("/storage")
+@login_required
+def storage():
+    status = console_status(g.db, current_app.config["SETTINGS"], current_app.extensions.get("audio"))
+    events = g.db.query(Event).order_by(Event.id.desc()).limit(40).all()
+    return render_template("storage.html", status=status, events=events)
+
+
+@bp.post("/storage/check")
+@login_required
+def storage_check():
+    summary = run_guard(current_app.config["SETTINGS"])
+    if summary.get("triggered"):
+        flash(
+            f"Storage check ran. Removed {summary['deleted']} verified file(s); kept {summary['kept']} that could not be verified.",
+            "ok",
+        )
+    else:
+        flash("Storage is under the cleanup line. Nothing was deleted.", "ok")
+    return redirect(url_for("pages.storage"))
+
+
+@bp.post("/storage/events/<int:event_id>/ack")
+@login_required
+def storage_ack(event_id: int):
+    event = g.db.get(Event, event_id)
+    if event is not None:
+        event.acked_at = utcnow()
+    return redirect(url_for("pages.storage"))
+
+
+@bp.get("/settings")
+@login_required
+def settings_page():
+    settings = current_app.config["SETTINGS"]
+    runtime = load_runtime(g.db, settings)
+    return render_template(
+        "settings.html",
+        runtime=runtime,
+        secrets={
+            "boondock": settings.boondock_configured,
+            "s3": settings.s3_configured,
+            "smtp": bool(settings.smtp_host and settings.smtp_from),
+            "bucket": settings.s3_bucket,
+            "boondock_base": settings.boondock_base_url,
+        },
+    )
+
+
+@bp.post("/settings")
+@login_required
+def settings_save():
+    try:
+        cap = int(request.form["stream_cap"])
+        chunk = int(request.form["chunk_seconds"])
+        idle = int(request.form["idle_days"])
+    except (KeyError, ValueError):
+        flash("Check the numbers and try again.", "error")
+        return redirect(url_for("pages.settings_page"))
+    if not (1 <= cap <= 64 and 5 <= chunk <= 3600 and 1 <= idle <= 3650):
+        flash("Cap must be 1–64, chunks 5–3600 seconds, idle days 1–3650.", "error")
+        return redirect(url_for("pages.settings_page"))
+    set_setting(g.db, "stream_cap", str(cap))
+    set_setting(g.db, "chunk_seconds", str(chunk))
+    set_setting(g.db, "idle_days", str(idle))
+    set_setting(g.db, "transcribe_enabled", "1" if request.form.get("transcribe_enabled") == "on" else "0")
+    set_setting(g.db, "boondock_language", (request.form.get("boondock_language") or "")[:16])
+    set_setting(g.db, "notify_email", (request.form.get("notify_email") or "")[:200])
+    set_setting(g.db, "notify_webhook", (request.form.get("notify_webhook") or "")[:500])
+    tz = (request.form.get("timezone") or "").strip()
+    if tz:
+        set_setting(g.db, "timezone", tz[:64])
+    flash("Settings saved. The midnight job uses the timezone from the next process start.", "ok")
+    return redirect(url_for("pages.settings_page"))
+
+
+@bp.get("/export")
+@login_required
+def export_page():
+    settings = current_app.config["SETTINGS"]
+    payload = build_export_zip(g.db, settings.data_dir)
+    return send_file(
+        io.BytesIO(payload),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="soundcore-export.zip",
+    )
+
+
+@bp.post("/import")
+@login_required
+def import_page():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        flash("Choose an export zip first.", "error")
+        return redirect(url_for("pages.settings_page"))
+    try:
+        summary = import_zip(g.db, upload.read(), current_app.config["SETTINGS"].data_dir)
+    except Exception as exc:
+        g.db.rollback()
+        flash(f"Import failed: {exc}", "error")
+        return redirect(url_for("pages.settings_page"))
+    flash(
+        f"Restored {summary['channels']} channels, {summary['recordings']} recordings, "
+        f"{summary['transcriptions']} transcripts, {summary['files_restored']} audio files.",
+        "ok",
+    )
+    return redirect(url_for("pages.dashboard"))

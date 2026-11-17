@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Channels · SoundCore{% endblock %}
+{% block eyebrow %}Inputs and outputs{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Name every device</h1>
+    <p class="lede">One USB card is one channel. The 3.5 mm input is just another capture device. Enabling an input starts its recording stream, and the cap on the desk still applies.</p>
+  </div>
+</section>
+
+{% if fresh %}
+<section class="panel">
+  <h2>Discovered, not yet added</h2>
+  <div class="stack-list">
+    {% for device in fresh %}
+    <form method="post" action="{{ url_for('pages.channels_save') }}" class="device-add">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="alsa_device" value="{{ device.id }}">
+      <input type="hidden" name="direction" value="{{ device.direction }}">
+      <input type="hidden" name="device_kind" value="{{ device.kind }}">
+      <input type="hidden" name="usb_id" value="{{ device.usb_id or '' }}">
+      <div>
+        <strong>{{ device.name }}</strong>
+        <span>{{ device.kind }} · {{ 'input' if device.direction == 'in' else 'output' }} · <code>{{ device.id }}</code></span>
+      </div>
+      <label>Name <input name="name" value="{{ device.name }}" required></label>
+      <label>Rate
+        <select name="sample_rate">
+          {% for rate in rates %}<option value="{{ rate }}" {% if rate == 16000 %}selected{% endif %}>{{ rate }} Hz</option>{% endfor %}
+        </select>
+      </label>
+      <label>Gain <input name="gain_db" type="number" step="0.5" min="-24" max="24" value="0"></label>
+      <label class="check"><input type="checkbox" name="enabled"> Enable</label>
+      <button class="btn solid" type="submit">Add</button>
+    </form>
+    {% endfor %}
+  </div>
+</section>
+{% else %}
+<section class="empty slim">
+  <h2>No new devices</h2>
+  <p>Everything the {{ audio_backend_name }} backend can see is already a channel. Plug in a card and reload this page to scan again.</p>
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>Configured channels</h2>
+  {% if not channels %}
+  <p class="muted">Nothing saved yet.</p>
+  {% endif %}
+  {% for channel in channels %}
+  <form method="post" action="{{ url_for('pages.channels_save') }}" class="channel-edit">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="channel_id" value="{{ channel.id }}">
+    <input type="hidden" name="direction" value="{{ channel.direction }}">
+    <input type="hidden" name="device_kind" value="{{ channel.device_kind }}">
+    <input type="hidden" name="usb_id" value="{{ channel.usb_id or '' }}">
+    <label>Name <input name="name" value="{{ channel.name }}" required></label>
+    <label>Device <input name="alsa_device" value="{{ channel.alsa_device }}" required></label>
+    <label>Rate
+      <select name="sample_rate">
+        {% for rate in rates %}<option value="{{ rate }}" {% if rate == channel.sample_rate %}selected{% endif %}>{{ rate }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Gain dB <input name="gain_db" type="number" step="0.5" min="-24" max="24" value="{{ channel.gain_db }}"></label>
+    <label class="check"><input type="checkbox" name="enabled" {% if channel.enabled %}checked{% endif %}> {{ 'Record' if channel.direction == 'in' else 'Available' }}</label>
+    <button class="btn solid" type="submit">Save</button>
+  </form>
+  <form method="post" action="{{ url_for('pages.channels_delete', channel_id=channel.id) }}" class="inline-delete">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn ghost danger" type="submit">Remove</button>
+  </form>
+  {% endfor %}
+</section>
+{% endblock %}

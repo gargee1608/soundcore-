@@ -1,0 +1,20 @@
+[Unit]
+Description=SoundCore capture, recording, offload, and transcription
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=soundcore
+Group=soundcore
+WorkingDirectory=/opt/soundcore
+EnvironmentFile=/etc/soundcore/soundcore.env
+ExecStart=/opt/soundcore/.venv/bin/python -m soundcore.worker
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+SupplementaryGroups=audio
+
+[Install]
+WantedBy=multi-user.target

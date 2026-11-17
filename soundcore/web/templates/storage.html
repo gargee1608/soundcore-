@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Storage · SoundCore{% endblock %}
+{% block eyebrow %}Disk and S3{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Keep 5% free</h1>
+    <p class="lede">At 95% full, SoundCore offloads the oldest closed files and deletes a local copy only after the S3 object’s size and ETag match. Unverified audio stays put, even if the disk is full.</p>
+  </div>
+  <form method="post" action="{{ url_for('pages.storage_check') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn solid" type="submit">Run storage check</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="disk-bar" aria-label="Disk used">
+    <span style="width: {{ (status.disk.used_ratio * 100)|round(1) }}%"></span>
+  </div>
+  <p class="lede">{{ status.disk.message }}</p>
+  <p class="meta">{{ (status.disk.free_bytes / 1024 / 1024)|round(0) }} MB free of {{ (status.disk.total_bytes / 1024 / 1024 / 1024)|round(1) }} GB. Midnight job moves files that nobody has played for seven days.</p>
+</section>
+
+<section class="panel">
+  <h2>Alerts</h2>
+  {% if not events %}
+  <p class="muted">No events yet.</p>
+  {% else %}
+  <ul class="alert-list">
+    {% for event in events %}
+    <li class="{{ event.level }}">
+      <div>
+        <strong>{{ event.kind }}</strong> {{ event.message }}
+        <span class="meta">{{ event.created_at|hm }}{% if event.acked_at %} · acknowledged{% endif %}</span>
+      </div>
+      {% if not event.acked_at %}
+      <form method="post" action="{{ url_for('pages.storage_ack', event_id=event.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn ghost" type="submit">Ack</button>
+      </form>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endblock %}

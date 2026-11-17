@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Settings · SoundCore{% endblock %}
+{% block eyebrow %}Appliance{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p class="lede">The stream cap is a limit you set after a soak test on the Pi. Secrets — admin password, Boondock key, AWS keys, SMTP password — stay in the environment file and are never written here.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <form method="post" action="{{ url_for('pages.settings_save') }}" class="settings-grid">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Stream cap
+      <input name="stream_cap" type="number" min="1" max="64" value="{{ runtime.stream_cap }}" required>
+    </label>
+    <label>Chunk seconds
+      <input name="chunk_seconds" type="number" min="5" max="3600" value="{{ runtime.chunk_seconds }}" required>
+    </label>
+    <label>Idle days before offload
+      <input name="idle_days" type="number" min="1" max="3650" value="{{ runtime.idle_days }}" required>
+    </label>
+    <label>Timezone
+      <input name="timezone" value="{{ runtime.timezone }}" required>
+    </label>
+    <label>Boondock language
+      <input name="boondock_language" value="{{ runtime.boondock_language }}" placeholder="en" maxlength="16">
+    </label>
+    <label>Notify email
+      <input name="notify_email" type="email" value="{{ runtime.notify_email }}">
+    </label>
+    <label class="wide">Notify webhook
+      <input name="notify_webhook" type="url" value="{{ runtime.notify_webhook }}" placeholder="https://example.test/hooks/soundcore">
+    </label>
+    <label class="check wide"><input type="checkbox" name="transcribe_enabled" {% if runtime.transcribe_enabled %}checked{% endif %}> Queue Boondock transcription when a chunk closes</label>
+    <button class="btn solid" type="submit">Save settings</button>
+  </form>
+</section>
+
+<section class="secret-row">
+  <article>
+    <h2>Boondock</h2>
+    <p>{{ 'Key configured' if secrets.boondock else 'Key missing' }}</p>
+    <code>{{ secrets.boondock_base }}</code>
+  </article>
+  <article>
+    <h2>S3</h2>
+    <p>{{ 'Credentials configured' if secrets.s3 else 'Not configured' }}</p>
+    <code>{{ secrets.bucket or 'no bucket' }}</code>
+  </article>
+  <article>
+    <h2>Email</h2>
+    <p>{{ 'SMTP configured' if secrets.smtp else 'Log and dashboard only' }}</p>
+  </article>
+</section>
+
+<section class="panel split-actions">
+  <div>
+    <h2>Export your data</h2>
+    <p class="lede">A zip of the database and any audio still on this machine. Recording ids stay attached to channels, transcripts, and S3 keys.</p>
+    <a class="btn solid" href="{{ url_for('pages.export_page') }}">Export your data</a>
+  </div>
+  <div>
+    <h2>Import your data</h2>
+    <p class="lede">Replaces the current database with the export and writes audio files back under the data directory.</p>
+    <form method="post" action="{{ url_for('pages.import_page') }}" enctype="multipart/form-data" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="file" name="file" accept=".zip,application/zip" required>
+      <button class="btn ghost" type="submit">Import your data</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

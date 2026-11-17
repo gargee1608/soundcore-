@@ -1,0 +1,12 @@
+# SoundCore sits behind Caddy. Flask stays on 127.0.0.1:8741.
+# Replace the site address. `tls internal` is fine on a LAN; drop it for a
+# public name and Caddy will fetch a certificate.
+{
+	admin off
+}
+
+:443 {
+	tls internal
+	encode gzip
+	reverse_proxy 127.0.0.1:8741
+}
