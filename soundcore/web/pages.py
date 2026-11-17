@@ -11,11 +11,13 @@ from flask import (
 )
 
 from soundcore.audio.detect import AudioBackendError
+from soundcore.audio.sanketptt import device_id_for, load_sanket_status, parse_sanket_source, web_url
 from soundcore.audio.service import load_audio_status
 from soundcore.auth import authenticate, login_required, login_user, logout_user
 from soundcore.maintenance import run_guard
-from soundcore.models import Channel, Event, Recording, Route, Transcription, utcnow
-from soundcore.ops import OpsError, delete_channel, save_channel, save_route
+from soundcore.models import Channel, Event, Recording, Route, Setting, Transcription, utcnow
+from soundcore.ops import OpsError, active_inputs, delete_channel, save_channel, save_route
+from soundcore.settings_store import load_runtime, set_setting
 from soundcore.transcription.worker import enqueue_transcription
 from soundcore.settings_store import load_runtime, set_setting
 from soundcore.status import console_status
@@ -106,13 +108,85 @@ def channels():
     settings = current_app.config["SETTINGS"]
     rows = g.db.query(Channel).order_by(Channel.direction, Channel.id).all()
     panel = _audio_panel(backend, settings, rows)
+    sanket = load_sanket_status(settings.data_dir)
+    sanket.setdefault("channels", {})
+    sanket.setdefault("connected", False)
+    sanket.setdefault("last_error", "")
+    sanket.setdefault("broker", "")
+    if sanket.get("connected"):
+        for name in sanket.get("subscribed") or []:
+            panel["available"].add(device_id_for(name))
+    runtime = load_runtime(g.db, settings)
+    active = active_inputs(g.db)
     return render_template(
         "channels.html",
         channels=rows,
         fresh=panel["fresh"],
         rates=settings.allowed_sample_rates,
         audio=panel,
+        sanket=sanket,
+        sanket_ids=[row.device_id for row in rows if (row.audio_backend or "") == "sanketptt"],
+        sanket_discover=_flag(g.db, "sanket_discover"),
+        sanket_auto_add=_flag(g.db, "sanket_auto_add"),
+        active_inputs=active,
+        stream_cap=runtime.stream_cap,
+        web_url=web_url,
     )
+
+
+def _flag(session, key: str) -> bool:
+    row = session.get(Setting, key)
+    return bool(row and str(row.value).strip().lower() in {"1", "true", "yes", "on"})
+
+
+@bp.post("/channels/sanket")
+@login_required
+def channels_sanket_add():
+    settings = current_app.config["SETTINGS"]
+    try:
+        source = parse_sanket_source(request.form.get("source", ""))
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("pages.channels"))
+    try:
+        save_channel(
+            g.db,
+            settings,
+            channel_id=None,
+            name=request.form.get("name") or source.channel,
+            alsa_device=device_id_for(source.channel),
+            device_id=device_id_for(source.channel),
+            audio_backend="sanketptt",
+            sample_rate=int(request.form.get("sample_rate") or settings.default_sample_rate),
+            gain_db=0.0,
+            enabled=request.form.get("enabled") == "on",
+            direction="in",
+            device_kind="radio",
+            actor=g.current_user.email,
+        )
+        flash(f"SanketPTT channel {source.channel} added.", "ok")
+    except (OpsError, ValueError) as exc:
+        flash(str(exc), "error")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.post("/channels/sanket/discover")
+@login_required
+def channels_sanket_discover():
+    set_setting(g.db, "sanket_discover", "1" if request.form.get("enabled") == "on" else "0")
+    if request.form.get("enabled") == "on":
+        flash("Discovery is on. Active SanketPTT channels show up here as people join them.", "ok")
+    else:
+        flash("SanketPTT discovery is off.", "ok")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.post("/channels/sanket/auto-add")
+@login_required
+def channels_sanket_auto_add():
+    set_setting(g.db, "sanket_auto_add", "1" if request.form.get("enabled") == "on" else "0")
+    flash("Auto-add is on. New channels are saved turned off so the stream cap still applies." if request.form.get("enabled") == "on" else "Auto-add is off.", "ok")
+    return redirect(url_for("pages.channels"))
 
 
 @bp.post("/channels/rescan")

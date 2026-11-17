@@ -210,6 +210,7 @@ class AudioService:
                 available = set()
             routes, notices = plan_routes(route_rows, outputs, available)
             desired_specs = desired
+            self._sync_sanket(session, rows)
         with self._route_lock:
             self._routes = routes
             self._notices = notices
@@ -239,6 +240,59 @@ class AudioService:
                 )
                 self._workers[channel_id] = (spec.signature, stop, thread)
                 thread.start()
+
+    def _sync_sanket(self, session, enabled_inputs) -> None:
+        from soundcore.audio.sanketptt import channel_from_device, device_id_for, get_hub
+        from soundcore.models import Channel, Setting
+        from soundcore.ops import save_channel
+
+        def flag(key: str) -> bool:
+            row = session.get(Setting, key)
+            return bool(row and row.value.strip().lower() in {"1", "true", "yes", "on"})
+
+        hub = get_hub()
+        hub.data_dir = Path(self.settings.data_dir)
+        names = []
+        for row in enabled_inputs:
+            _device, backend_name = channel_endpoint(row)
+            if backend_name == "sanketptt":
+                names.append(channel_from_device(row.device_id or row.alsa_device))
+        discover = flag("sanket_discover")
+        auto_add = flag("sanket_auto_add")
+        hub.set_channels(names)
+        hub.set_discover(discover or auto_add)
+        if names or discover or auto_add:
+            hub.ensure()
+        hub.expire()
+        if auto_add:
+            known = {
+                channel_from_device(row.device_id or row.alsa_device)
+                for row in session.query(Channel).all()
+                if (row.audio_backend or "") == "sanketptt" or (row.device_id or "").startswith("sanketptt:")
+            }
+            for name in hub.status().get("channels", {}):
+                if name in known:
+                    continue
+                try:
+                    save_channel(
+                        session,
+                        self.settings,
+                        channel_id=None,
+                        name=name,
+                        alsa_device=device_id_for(name),
+                        device_id=device_id_for(name),
+                        audio_backend="sanketptt",
+                        sample_rate=self.settings.default_sample_rate,
+                        gain_db=0.0,
+                        enabled=False,
+                        direction="in",
+                        device_kind="radio",
+                        actor="sanket-discover",
+                    )
+                    known.add(name)
+                except Exception:
+                    logger.exception("could not auto-add SanketPTT channel %s", name)
+        hub.write_status()
 
     def _routes_for(self, channel_id: int) -> list[RouteTarget]:
         with self._route_lock:
@@ -270,6 +324,23 @@ class AudioService:
                 self._sync_playbacks(spec, playbacks, open_ids)
                 runtime = self._runtime()
                 now_mono = time.monotonic()
+                # SanketPTT is quiet between calls. Do not open a WAV for that
+                # silence. A file opens when audio arrives and closes when the
+                # floor is released or the 2.5 s floor timeout ends it. A call
+                # longer than the chunk length still rotates like any other input.
+                gated = bool(getattr(capture, "records_only_while_active", False))
+                if gated and not getattr(capture, "in_transmission", False):
+                    try:
+                        capture.read(frames)
+                    except Exception:
+                        logger.exception("read failed on %s", spec.device_id)
+                    if writer is not None:
+                        self._finalize(recording_id, writer)
+                        writer = None
+                        recording_id = None
+                    self._set_level(spec.id, 0.0)
+                    stop.wait(0.05)
+                    continue
                 rotate = writer is None or (now_mono - chunk_started) >= runtime.chunk_seconds
                 if rotate:
                     blocked = self._disk_blocks_new_file()
@@ -435,25 +506,6 @@ class AudioService:
             logger.debug("could not write audio status", exc_info=True)
 
 
-def load_audio_status(data_dir) -> dict:
-    path = Path(data_dir) / "logs" / "audio_status.json"
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _playback_alive(playback) -> bool:
-    proc = getattr(playback, "proc", None)
-    if proc is not None and proc.poll() is not None:
-        return False
-    if getattr(playback, "last_error", "") and proc is None and getattr(playback, "_sock", None) is None:
-        return False
-    return True
-
     def _runtime(self):
         now = time.monotonic()
         if self._runtime_cache is not None and now - self._runtime_at < 2:
@@ -540,6 +592,25 @@ def _playback_alive(playback) -> bool:
         except Exception:
             logger.exception("failed to finalize recording %s", recording_id)
 
+
+def load_audio_status(data_dir) -> dict:
+    path = Path(data_dir) / "logs" / "audio_status.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _playback_alive(playback) -> bool:
+    proc = getattr(playback, "proc", None)
+    if proc is not None and proc.poll() is not None:
+        return False
+    if getattr(playback, "last_error", "") and proc is None and getattr(playback, "_sock", None) is None:
+        return False
+    return True
 
 class _NotifySettings:
     def __init__(self, settings, runtime):

@@ -65,10 +65,12 @@ def save_channel(
     device_id = (device_id or alsa_device or "").strip()
     alsa_device = device_id
     inferred = infer_backend(device_id)
-    if inferred in {"pipewire", "simulated"}:
+    if inferred in {"pipewire", "simulated", "sanketptt"}:
         audio_backend = inferred
     else:
         audio_backend = (audio_backend or inferred).strip() or "alsa"
+    if audio_backend == "sanketptt" and direction != "in":
+        raise OpsError("SanketPTT channels are inputs only.")
     if not name:
         raise OpsError("A channel needs a name.")
     if not device_id:

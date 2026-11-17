@@ -48,6 +48,7 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}" "${DATA_DIR}"
 if [[ ! -d "${INSTALL_ROOT}/.venv" ]]; then
   sudo -u "${SERVICE_USER}" python3 -m venv "${INSTALL_ROOT}/.venv"
 fi
+# requirements.txt includes paho-mqtt and websocket-client for SanketPTT receive.
 sudo -u "${SERVICE_USER}" "${INSTALL_ROOT}/.venv/bin/pip" install -r "${INSTALL_ROOT}/requirements.txt"
 
 if [[ ! -f "${ENV_FILE}" ]]; then

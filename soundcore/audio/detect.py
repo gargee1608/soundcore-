@@ -56,6 +56,8 @@ def infer_backend(device_id: str) -> str:
         return "pipewire"
     if device_id.startswith("sim:"):
         return "simulated"
+    if device_id.startswith("sanketptt:"):
+        return "sanketptt"
     return "alsa"
 
 
@@ -363,6 +365,10 @@ class HybridBackend:
         kind = backend_name or infer_backend(device_id)
         if kind == "pipewire":
             return self.pipewire.open_capture(device_id, sample_rate, gain_db)
+        if kind == "sanketptt":
+            from soundcore.audio.sanketptt import SanketCapture, channel_from_device, get_hub
+
+            return SanketCapture(channel_from_device(device_id), sample_rate, get_hub())
         if kind == "simulated":
             return SimulatedBackend().open_capture(device_id, sample_rate, gain_db)
         return self.alsa.open_capture(device_id, sample_rate, gain_db)

@@ -239,6 +239,9 @@ These change channels, routes, storage, settings, or the export archive. They re
 | POST | `/channels` | `https://<pi-hostname-or-ip>/channels` | `http://127.0.0.1:8741/channels` | Save a channel |
 | POST | `/channels/<id>/delete` | `https://<pi-hostname-or-ip>/channels/<id>/delete` | `http://127.0.0.1:8741/channels/<id>/delete` | Delete a channel |
 | POST | `/channels/rescan` | `https://<pi-hostname-or-ip>/channels/rescan` | `http://127.0.0.1:8741/channels/rescan` | Rescan ALSA and PipeWire devices |
+| POST | `/channels/sanket` | `https://<pi-hostname-or-ip>/channels/sanket` | `http://127.0.0.1:8741/channels/sanket` | Add one SanketPTT input |
+| POST | `/channels/sanket/discover` | `https://<pi-hostname-or-ip>/channels/sanket/discover` | `http://127.0.0.1:8741/channels/sanket/discover` | Turn SanketPTT discovery on or off |
+| POST | `/channels/sanket/auto-add` | `https://<pi-hostname-or-ip>/channels/sanket/auto-add` | `http://127.0.0.1:8741/channels/sanket/auto-add` | Turn SanketPTT auto-add on or off |
 | POST | `/routing` | `https://<pi-hostname-or-ip>/routing` | `http://127.0.0.1:8741/routing` | Save a route |
 | POST | `/routing/<id>/delete` | `https://<pi-hostname-or-ip>/routing/<id>/delete` | `http://127.0.0.1:8741/routing/<id>/delete` | Delete a route |
 | POST | `/recordings/<id>/transcribe` | `https://<pi-hostname-or-ip>/recordings/<id>/transcribe` | `http://127.0.0.1:8741/recordings/<id>/transcribe` | Queue transcription for one file |
@@ -474,3 +477,37 @@ sudo reboot
 sudo soundcore-audio-diagnostics
 curl -fsS http://127.0.0.1:8741/healthz
 ```
+
+## 14. SanketPTT channels
+
+SanketPTT is a browser push-to-talk radio at `https://vibhvesh.github.io/sanketptt/`. A channel is a free-form name. The default is `virtual`. A link looks like `https://vibhvesh.github.io/sanketptt/?ch=police1`. The web page also accepts `listen=1` and `name=`. `embed=1` only changes the page layout.
+
+SoundCore treats each name as one input. Many inputs share one receive-only MQTT connection over secure WebSockets. The broker list, in order, is the same one the web app and Sanket Edge use: `public.cloud.shiftr.io`, then EMQX, HiveMQ, and Mosquitto's test broker. Topics are `ptt-radio-66ab9178/<channel>/{presence/<id>,floor,audio,sstv}`. Audio is 12 kHz 16-bit PCM. SoundCore resamples it to the channel's rate and then records, listens, routes, and transcribes it like a hardware input. It never transmits and it does not publish presence, so this appliance does not show up as a talker.
+
+On Channels, paste the link or the name and press Add SanketPTT. Enable is refused when the stream cap is already full; the page says so, and the channel can still be saved turned off. Each saved channel has an Open in SanketPTT link back to `?ch=<name>`.
+
+Discover SanketPTT channels subscribes to `ptt-radio-66ab9178/+/presence/+` (the wildcard Sanket Edge uses; `+/presence` alone does not match `presence/<id>`), plus `ptt-radio-66ab9178/+/audio` and `ptt-radio-66ab9178/+/floor`, then lists names with online and talking counts. Names keep the case from `?ch=`, the same way the web app does. Add is one click. Auto-add is off unless you turn it on. Auto-add saves those names turned off, so the cap does not move until you enable one.
+
+A transmission shorter than 0.4 seconds is dropped, which is Sanket Edge's minimum clip. Silence between calls does not open a WAV. The file starts when audio is accepted and closes when the floor is released or has been quiet for 2.5 seconds. A longer call still splits at the normal chunk length.
+
+The channel row and the diagnostics panel show the connected broker, the last packet time, the current talker, and the last error.
+
+`/opt/soundcore` on a Pi is often a shallow one-branch clone. Fetch this branch by name, then reinstall. That does not delete `/var/lib/soundcore`:
+
+```bash
+sudo systemctl stop soundcore.service soundcore-worker.service
+cd /opt/soundcore
+sudo git fetch --depth 1 origin feature/raspberry-pi-pipewire-audio:feature/raspberry-pi-pipewire-audio
+sudo git checkout feature/raspberry-pi-pipewire-audio
+sudo bash install.sh
+```
+
+If checkout refuses because the install already edited tracked files, point the work tree at the fetched commit:
+
+```bash
+sudo git fetch origin feature/raspberry-pi-pipewire-audio:refs/remotes/origin/feature/raspberry-pi-pipewire-audio
+sudo git reset --hard refs/remotes/origin/feature/raspberry-pi-pipewire-audio
+sudo bash install.sh
+```
+
+This path was checked with a fake MQTT client. It has not been tried live against the public brokers.

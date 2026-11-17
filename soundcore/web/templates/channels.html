@@ -32,7 +32,73 @@
       {% else %}no playback process reported{% endif %}
     </p>
     <p><span>Last audio error</span> {{ audio.snapshot.last_error or audio.error or 'none' }}</p>
+    <p><span>SanketPTT</span>
+      {% if sanket.connected %}connected to {{ sanket.broker or sanket.broker_url }}{% else %}not connected{% endif %}
+      {% if sanket.last_error %} — {{ sanket.last_error }}{% endif %}
+    </p>
   </div>
+</section>
+
+<section class="panel">
+  <h2>SanketPTT channels</h2>
+  <p class="lede">Each web channel is one input. They share a single receive-only MQTT connection. Paste a link such as <code>https://vibhvesh.github.io/sanketptt/?ch=police1</code> or type the channel name.</p>
+  {% if active_inputs >= stream_cap %}
+  <p class="flash error">Stream cap is {{ stream_cap }} and {{ active_inputs }} inputs are already recording. You can still add a SanketPTT channel, but it stays off until you disable another input.</p>
+  {% else %}
+  <p class="meta">{{ active_inputs }} of {{ stream_cap }} inputs are recording. Enabling another one is allowed.</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('pages.channels_sanket_add') }}" class="route-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="wide">Link or channel name
+      <input name="source" placeholder="https://vibhvesh.github.io/sanketptt/?ch=police1" required>
+    </label>
+    <label>Name <input name="name" placeholder="police1"></label>
+    <label>Rate
+      <select name="sample_rate">
+        {% for rate in rates %}<option value="{{ rate }}" {% if rate == 16000 %}selected{% endif %}>{{ rate }} Hz</option>{% endfor %}
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="enabled" {% if active_inputs >= stream_cap %}disabled{% endif %}> Enable</label>
+    <button class="btn solid" type="submit">Add SanketPTT</button>
+  </form>
+  <form method="post" action="{{ url_for('pages.channels_sanket_discover') }}" class="inline-delete">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="enabled" value="{{ 'off' if sanket_discover else 'on' }}">
+    <button class="btn ghost" type="submit">{{ 'Stop discovery' if sanket_discover else 'Discover SanketPTT channels' }}</button>
+  </form>
+  <form method="post" action="{{ url_for('pages.channels_sanket_auto_add') }}" class="inline-delete">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="enabled" value="{{ 'off' if sanket_auto_add else 'on' }}">
+    <button class="btn ghost" type="submit">{{ 'Auto-add is on' if sanket_auto_add else 'Auto-add is off' }}</button>
+  </form>
+  <p class="meta">Auto-add is {{ 'on' if sanket_auto_add else 'off' }} (default off). It saves newly heard channels turned off, so the stream cap is unchanged until you enable one.</p>
+  {% if sanket.channels %}
+  <table class="grid">
+    <thead><tr><th>Heard on the relay</th><th>Online</th><th>Talking</th><th></th></tr></thead>
+    <tbody>
+      {% for name, row in sanket.channels.items() %}
+      <tr>
+        <td>{{ name }}</td>
+        <td>{{ row.online }}</td>
+        <td>{{ row.talking or '—' }}</td>
+        <td>
+          <a href="{{ web_url(name) }}">Open in SanketPTT</a>
+          {% if 'sanketptt:' ~ name not in sanket_ids %}
+          <form method="post" action="{{ url_for('pages.channels_sanket_add') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="source" value="{{ name }}">
+            <input type="hidden" name="name" value="{{ name }}">
+            <button class="btn ghost" type="submit">Add</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif sanket_discover %}
+  <p class="muted">Discovery is listening. Names show up when someone is present on a channel.</p>
+  {% endif %}
 </section>
 
 {% if fresh %}
@@ -90,7 +156,14 @@
     <label>Name <input name="name" value="{{ channel.name }}" required></label>
     <label>Device
       <input name="alsa_device" value="{{ device_key }}" required>
-      <span class="meta">Backend {{ channel.audio_backend or 'alsa' }} · Direction {{ 'input' if channel.direction == 'in' else 'output' }}{% if device_key not in audio.available %} · disconnected{% endif %}</span>
+      <span class="meta">Backend {{ channel.audio_backend or 'alsa' }} · Direction {{ 'input' if channel.direction == 'in' else 'output' }}{% if device_key not in audio.available %} · disconnected{% endif %}
+        {% if channel.audio_backend == 'sanketptt' %}
+          {% set live = sanket.channels.get(device_key.split(':')[-1], {}) if sanket.channels else {} %}
+          {% if live %} · broker {{ sanket.broker or '—' }} · last packet {{ live.last_packet or '—' }} · talker {{ live.talking or live.last_talker or '—' }}{% endif %}
+          {% if sanket.last_error %} · {{ sanket.last_error }}{% endif %}
+          · <a href="{{ web_url(device_key.split(':')[-1]) }}">Open in SanketPTT</a>
+        {% endif %}
+      </span>
     </label>
     <label>Rate
       <select name="sample_rate">
