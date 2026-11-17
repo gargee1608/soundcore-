@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 
+from soundcore.audio.detect import infer_backend
 from soundcore.audio.naming import slugify
 from soundcore.capacity import can_start_another
 from soundcore.models import Channel, Route, Stream, utcnow
@@ -33,6 +34,16 @@ def active_inputs(session) -> int:
     return session.query(Channel).filter_by(direction="in", enabled=True).count()
 
 
+def channel_endpoint(channel) -> tuple[str, str]:
+    """Return (device_id, backend), falling back to a legacy alsa_device."""
+    device_id = (getattr(channel, "device_id", None) or "").strip()
+    legacy = (getattr(channel, "alsa_device", None) or "").strip()
+    if not device_id:
+        device_id = legacy
+    backend = (getattr(channel, "audio_backend", None) or "").strip() or infer_backend(device_id)
+    return device_id, backend
+
+
 def save_channel(
     session,
     settings,
@@ -47,12 +58,20 @@ def save_channel(
     device_kind: str = "usb",
     usb_id: str | None = None,
     actor: str = "",
+    audio_backend: str = "",
+    device_id: str = "",
 ) -> Channel:
     name = (name or "").strip()
-    alsa_device = (alsa_device or "").strip()
+    device_id = (device_id or alsa_device or "").strip()
+    alsa_device = device_id
+    inferred = infer_backend(device_id)
+    if inferred in {"pipewire", "simulated"}:
+        audio_backend = inferred
+    else:
+        audio_backend = (audio_backend or inferred).strip() or "alsa"
     if not name:
         raise OpsError("A channel needs a name.")
-    if not alsa_device:
+    if not device_id:
         raise OpsError("Pick an input or output device.")
     if direction not in {"in", "out"}:
         raise OpsError("Direction must be input or output.")
@@ -77,6 +96,8 @@ def save_channel(
             name=name or "channel",
             slug=f"new-{secrets.token_hex(4)}",
             alsa_device=alsa_device or "pending",
+            audio_backend=audio_backend,
+            device_id=device_id,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -97,6 +118,8 @@ def save_channel(
     channel.name = name
     channel.slug = _unique_slug(session, name, ignore_id=channel.id)
     channel.alsa_device = alsa_device
+    channel.device_id = device_id
+    channel.audio_backend = audio_backend
     channel.sample_rate = sample_rate
     channel.gain_db = gain_db
     channel.enabled = bool(enabled)

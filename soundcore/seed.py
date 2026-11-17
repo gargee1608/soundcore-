@@ -32,6 +32,8 @@ def seed_channels(session, backend, *, enable_demo: bool, cap: int, sample_rate:
             slug=_unique_slug(session, device.name),
             direction=device.direction,
             alsa_device=device.id,
+            audio_backend=device.backend or "alsa",
+            device_id=device.id,
             usb_id=device.usb_id,
             device_kind=device.kind,
             sample_rate=sample_rate,

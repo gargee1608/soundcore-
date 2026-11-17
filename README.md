@@ -87,7 +87,7 @@ The install script:
 - creates a `soundcore` user in the `audio` group
 - installs two systemd units
 
-`soundcore-worker` captures, records, relays, offloads, and transcribes. `soundcore` serves the console and the live-listen sockets. On the Pi, `SOUNDCORE_EMBED_WORKER=0` and `SOUNDCORE_AUDIO_BACKEND=alsa`, so the two processes do not both open the same devices. They share SQLite (WAL) and a localhost UDP hop for live PCM.
+`soundcore-worker` captures, records, relays, offloads, and transcribes. `soundcore` serves the console and the live-listen sockets. On the Pi, `SOUNDCORE_EMBED_WORKER=0` and `SOUNDCORE_AUDIO_BACKEND=hybrid`, so the two processes do not both open the same devices. USB capture stays on ALSA. Playback can use that ALSA device or a PipeWire sink such as a Bluetooth speaker. They share SQLite (WAL) and a localhost UDP hop for live PCM. The worker is still user `soundcore`; it reaches the desktop user's PipeWire through a group socket. See the install guide.
 
 Flask binds to `127.0.0.1:8741` only. Put Caddy or nginx in front of it:
 

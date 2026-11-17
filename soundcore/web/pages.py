@@ -10,6 +10,8 @@ from flask import (
     url_for,
 )
 
+from soundcore.audio.detect import AudioBackendError
+from soundcore.audio.service import load_audio_status
 from soundcore.auth import authenticate, login_required, login_user, logout_user
 from soundcore.maintenance import run_guard
 from soundcore.models import Channel, Event, Recording, Route, Transcription, utcnow
@@ -59,21 +61,68 @@ def dashboard():
     return render_template("dashboard.html", status=status, recent=recent, names=names)
 
 
+def _scan_devices(backend):
+    try:
+        devices = list(backend.list_devices())
+        error = getattr(backend, "last_error", "") or getattr(getattr(backend, "pipewire", None), "last_error", "")
+    except AudioBackendError as exc:
+        devices = []
+        error = str(exc)
+    return devices, error
+
+
+def _audio_panel(backend, settings, channels):
+    devices, error = _scan_devices(backend)
+    known = set()
+    for row in channels:
+        known.add(row.alsa_device)
+        if getattr(row, "device_id", ""):
+            known.add(row.device_id)
+    fresh = [device for device in devices if device.id not in known and device.backend != "simulated"]
+    snapshot = load_audio_status(settings.data_dir)
+    sinks = [device for device in devices if device.backend == "pipewire" and device.direction == "out"]
+    sources = [device for device in devices if device.backend == "pipewire" and device.direction == "in"]
+    bluetooth = [device for device in sinks if device.kind == "bluetooth"]
+    available = {device.id for device in devices if device.available}
+    return {
+        "devices": devices,
+        "fresh": fresh,
+        "error": error,
+        "snapshot": snapshot,
+        "sinks": sinks,
+        "sources": sources,
+        "bluetooth": bluetooth,
+        "bluetooth_connected": bool(bluetooth),
+        "available": available,
+        "input_backends": sorted({device.backend for device in devices if device.direction == "in"}),
+        "output_backends": sorted({device.backend for device in devices if device.direction == "out"}),
+    }
+
+
 @bp.get("/channels")
 @login_required
 def channels():
     backend = current_app.extensions["audio_backend"]
-    devices = backend.list_devices()
-    rows = g.db.query(Channel).order_by(Channel.direction, Channel.id).all()
-    known = {row.alsa_device for row in rows}
-    fresh = [device for device in devices if device.id not in known]
     settings = current_app.config["SETTINGS"]
+    rows = g.db.query(Channel).order_by(Channel.direction, Channel.id).all()
+    panel = _audio_panel(backend, settings, rows)
     return render_template(
         "channels.html",
         channels=rows,
-        fresh=fresh,
+        fresh=panel["fresh"],
         rates=settings.allowed_sample_rates,
+        audio=panel,
     )
+
+
+@bp.post("/channels/rescan")
+@login_required
+def channels_rescan():
+    backend = current_app.extensions["audio_backend"]
+    if hasattr(backend, "rescan"):
+        backend.rescan()
+    flash("Device scan refreshed.", "ok")
+    return redirect(url_for("pages.channels"))
 
 
 @bp.post("/channels")
@@ -94,6 +143,8 @@ def channels_save():
             direction=request.form.get("direction") or "in",
             device_kind=request.form.get("device_kind") or "usb",
             usb_id=request.form.get("usb_id") or None,
+            audio_backend=request.form.get("audio_backend") or "",
+            device_id=request.form.get("alsa_device") or request.form.get("device_id") or "",
             actor=g.current_user.email,
         )
         flash("Channel saved.", "ok")
@@ -124,7 +175,17 @@ def routing():
     outputs = g.db.query(Channel).filter_by(direction="out").order_by(Channel.name).all()
     routes = g.db.query(Route).order_by(Route.id).all()
     names = {row.id: row for row in inputs + outputs}
-    return render_template("routing.html", inputs=inputs, outputs=outputs, routes=routes, names=names)
+    backend = current_app.extensions["audio_backend"]
+    settings = current_app.config["SETTINGS"]
+    panel = _audio_panel(backend, settings, inputs + outputs)
+    return render_template(
+        "routing.html",
+        inputs=inputs,
+        outputs=outputs,
+        routes=routes,
+        names=names,
+        audio=panel,
+    )
 
 
 @bp.post("/routing")

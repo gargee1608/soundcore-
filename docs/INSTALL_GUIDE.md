@@ -238,6 +238,7 @@ These change channels, routes, storage, settings, or the export archive. They re
 | --- | --- | --- | --- | --- |
 | POST | `/channels` | `https://<pi-hostname-or-ip>/channels` | `http://127.0.0.1:8741/channels` | Save a channel |
 | POST | `/channels/<id>/delete` | `https://<pi-hostname-or-ip>/channels/<id>/delete` | `http://127.0.0.1:8741/channels/<id>/delete` | Delete a channel |
+| POST | `/channels/rescan` | `https://<pi-hostname-or-ip>/channels/rescan` | `http://127.0.0.1:8741/channels/rescan` | Rescan ALSA and PipeWire devices |
 | POST | `/routing` | `https://<pi-hostname-or-ip>/routing` | `http://127.0.0.1:8741/routing` | Save a route |
 | POST | `/routing/<id>/delete` | `https://<pi-hostname-or-ip>/routing/<id>/delete` | `http://127.0.0.1:8741/routing/<id>/delete` | Delete a route |
 | POST | `/recordings/<id>/transcribe` | `https://<pi-hostname-or-ip>/recordings/<id>/transcribe` | `http://127.0.0.1:8741/recordings/<id>/transcribe` | Queue transcription for one file |
@@ -406,3 +407,70 @@ sudo systemctl disable --now caddy
 ```
 
 Delete `/etc/soundcore/soundcore.env` yourself when you want the admin password and cloud keys gone.
+
+## 13. Audio devices, Bluetooth, and USB outputs
+
+Capture and playback are separate. USB and the 3.5 mm jack are ALSA. The Pi's built-in Bluetooth speaker is not an ALSA card. PipeWire, running as the desktop user, exposes it as a Pulse sink. The worker is still the system user `soundcore`. It is not root.
+
+The install gives `soundcore` a group socket instead of a login on the desktop session:
+
+- Group `soundcore-audio` contains `soundcore` and the session user (`SOUNDCORE_SESSION_USER`, default `sensepart`).
+- `loginctl enable-linger` starts that user's PipeWire at boot, with no desktop login.
+- PipeWire also listens on `/run/soundcore/pulse.sock`. The directory is `2770 root:soundcore-audio`. A user service chgrp/chmod the socket to `0660`.
+- The worker unit sets `PULSE_SERVER=unix:/run/soundcore/pulse.sock` and `SupplementaryGroups=audio soundcore-audio`.
+- If that socket is not reachable, install enables a localhost bridge on `127.0.0.1:8743` that runs `paplay` as the session user. `SOUNDCORE_AUDIO_BRIDGE=1` selects it. The bridge accepts only loopback connections.
+
+Anyone in `soundcore-audio` can play audio as the session user. Do not put untrusted accounts in that group. The socket is not on the network. The bridge is not either.
+
+### Pair a Bluetooth speaker
+
+Install already pulls in `bluez`. On the Pi:
+
+```bash
+bluetoothctl
+power on
+agent on
+default-agent
+scan on
+```
+
+Wait until the speaker appears. For a device that PipeWire will show as `pTron BT SPEAKER`, pair, trust, and connect its address:
+
+```bash
+pair AA:BB:CC:DD:EE:FF
+trust AA:BB:CC:DD:EE:FF
+connect AA:BB:CC:DD:EE:FF
+quit
+```
+
+Open Channels and press Rescan. The speaker is an output with backend `pipewire`, not an ALSA input. Add it, then on Routing send a USB input to that output. Recording continues while the speaker plays the same PCM. If the speaker powers off, the route stays and the Channels page says disconnected. When it reconnects, playback resumes without restarting SoundCore.
+
+`sudo soundcore-audio-diagnostics` prints ALSA devices, `wpctl` and `pactl` nodes, `bluetoothctl` controller and connected devices, the `soundcore` user's groups, whether that user can open the Pulse socket, and the recent worker log.
+
+### Pick the USB card's output
+
+`aplay -l` lists playback devices. A USB sound card looks like `card 1: Device [USB Audio], device 0`. Its id is `plughw:1,0`. HDMI (`vc4-hdmi`) is an output only and is not offered as a capture device. A USB stick that enumerates as storage or HID is not listed, because discovery reads `arecord -l` and `aplay -l`, not `lsusb`.
+
+On Channels, add that `plughw` device as an output with backend `alsa`. Route the input to it. That path stays ALSA (`ffmpeg` to the playback device) and does not need PipeWire.
+
+### Update an existing install
+
+From a checkout of `feature/raspberry-pi-pipewire-audio`, on the Pi, as root. This does not delete `/var/lib/soundcore` or rewrite a password you already set. The first start adds `audio_backend` and `device_id` on `channels` and copies the old `alsa_device` into `device_id` with backend `alsa`. Recordings stay where they are.
+
+```bash
+sudo systemctl stop soundcore.service soundcore-worker.service
+cd /opt/soundcore
+sudo git fetch origin feature/raspberry-pi-pipewire-audio
+sudo git checkout feature/raspberry-pi-pipewire-audio
+sudo bash install.sh
+```
+
+If `/opt/soundcore` is not a git checkout, clone the branch somewhere else and run `sudo bash install.sh` from that directory. `install.sh` copies the tree into `/opt/soundcore` and leaves `/var/lib/soundcore` alone.
+
+`install.sh` changes `SOUNDCORE_AUDIO_BACKEND=alsa` to `hybrid` so PipeWire outputs show up. Other settings in `/etc/soundcore/soundcore.env` stay. Then reboot once and confirm the services come back with nobody logged into the desktop:
+
+```bash
+sudo reboot
+sudo soundcore-audio-diagnostics
+curl -fsS http://127.0.0.1:8741/healthz
+```

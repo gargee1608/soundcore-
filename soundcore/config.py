@@ -96,6 +96,9 @@ class Settings:
     live_pcm_host: str = "127.0.0.1"
     live_pcm_port: int = 8742
     guard_interval_seconds: int = 60
+    session_user: str = "sensepart"
+    pulse_server: str = "unix:/run/soundcore/pulse.sock"
+    audio_bridge: bool = False
     allowed_sample_rates: tuple[int, ...] = field(
         default_factory=lambda: (8000, 16000, 22050, 44100, 48000)
     )
@@ -238,4 +241,7 @@ def load_settings(*, dotenv: bool = False, environ: dict | None = None) -> Setti
         live_pcm_host=str(raw("live_pcm_host", "SOUNDCORE_LIVE_HOST", "127.0.0.1") or "127.0.0.1"),
         live_pcm_port=_int(str(raw("live_pcm_port", "SOUNDCORE_LIVE_PORT", "8742")), 8742),
         guard_interval_seconds=_int(str(raw("guard_interval_seconds", "SOUNDCORE_GUARD_INTERVAL", "60")), 60),
+        session_user=str(raw("session_user", "SOUNDCORE_SESSION_USER", "sensepart") or "sensepart"),
+        pulse_server=str(raw("pulse_server", "PULSE_SERVER", "unix:/run/soundcore/pulse.sock") or "unix:/run/soundcore/pulse.sock"),
+        audio_bridge=_bool(str(raw("audio_bridge", "SOUNDCORE_AUDIO_BRIDGE", "")) or None, False),
     )

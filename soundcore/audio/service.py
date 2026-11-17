@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from soundcore.audio.naming import build_recording_relative_path, new_unique_id
+from soundcore.ops import channel_endpoint
 from soundcore.audio.pcm import pcm_rms
 from soundcore.audio.recorder import WavRecorder, fanout
 from soundcore.db import session_scope
@@ -32,10 +34,93 @@ class ChannelSpec:
     sample_rate: int
     gain_db: float
     stream_id: int | None
+    device_id: str = ""
+    audio_backend: str = "alsa"
+
+    def __post_init__(self) -> None:
+        if not self.device_id:
+            self.device_id = self.alsa_device
 
     @property
     def signature(self) -> tuple:
-        return (self.alsa_device, self.sample_rate, round(self.gain_db, 2))
+        return (self.device_id, self.audio_backend, self.sample_rate, round(self.gain_db, 2))
+
+
+@dataclass
+class RouteTarget:
+    input_channel_id: int
+    output_channel_id: int
+    device_id: str
+    sample_rate: int
+    backend: str
+    output_name: str
+    connected: bool
+    detail: str
+
+
+def plan_routes(route_rows, outputs_by_id, available_ids: set[str]) -> tuple[dict[int, list[RouteTarget]], list[dict]]:
+    """Keep a route even when its sink is gone, and say so instead of dropping it.
+
+    Disabled outputs and missing channel rows are reported too. Only enabled
+    routes are expected in route_rows.
+    """
+    plan: dict[int, list[RouteTarget]] = {}
+    notices: list[dict] = []
+    for route in route_rows:
+        output = outputs_by_id.get(route.output_channel_id)
+        if output is None:
+            notices.append(
+                {
+                    "input_channel_id": route.input_channel_id,
+                    "output_channel_id": route.output_channel_id,
+                    "reason": "missing",
+                    "detail": "Destination channel is gone",
+                    "connected": False,
+                }
+            )
+            continue
+        device_id, backend = channel_endpoint(output)
+        if not output.enabled:
+            notices.append(
+                {
+                    "input_channel_id": route.input_channel_id,
+                    "output_channel_id": output.id,
+                    "device_id": device_id,
+                    "backend": backend,
+                    "name": output.name,
+                    "reason": "disabled",
+                    "detail": f"{output.name} is disabled",
+                    "connected": False,
+                }
+            )
+            continue
+        connected = device_id in available_ids
+        detail = "" if connected else f"{output.name} is not available ({device_id})"
+        if not connected:
+            notices.append(
+                {
+                    "input_channel_id": route.input_channel_id,
+                    "output_channel_id": output.id,
+                    "device_id": device_id,
+                    "backend": backend,
+                    "name": output.name,
+                    "reason": "disconnected",
+                    "detail": detail,
+                    "connected": False,
+                }
+            )
+        target = RouteTarget(
+            input_channel_id=route.input_channel_id,
+            output_channel_id=output.id,
+            device_id=device_id,
+            sample_rate=output.sample_rate,
+            backend=backend,
+            output_name=output.name,
+            connected=connected,
+            detail=detail,
+        )
+        plan.setdefault(route.input_channel_id, []).append(target)
+    return plan, notices
 
 
 class AudioService:
@@ -46,7 +131,10 @@ class AudioService:
         self._levels: dict[int, float] = {}
         self._level_lock = threading.Lock()
         self._route_lock = threading.Lock()
-        self._routes: dict[int, list[tuple[str, int]]] = {}
+        self._routes: dict[int, list[RouteTarget]] = {}
+        self._notices: list[dict] = []
+        self._playback_status: dict[str, dict] = {}
+        self._status_lock = threading.Lock()
         self._stop = threading.Event()
         self._workers: dict[int, tuple[tuple, threading.Event, threading.Thread]] = {}
         self._thread: threading.Thread | None = None
@@ -95,8 +183,10 @@ class AudioService:
         with session_scope() as session:
             rows = session.query(Channel).filter_by(direction="in", enabled=True).all()
             streams = {stream.channel_id: stream.id for stream in session.query(Stream).all()}
-            desired = {
-                row.id: ChannelSpec(
+            desired = {}
+            for row in rows:
+                device_id, backend_name = channel_endpoint(row)
+                desired[row.id] = ChannelSpec(
                     id=row.id,
                     name=row.name,
                     slug=row.slug,
@@ -104,22 +194,26 @@ class AudioService:
                     sample_rate=row.sample_rate,
                     gain_db=row.gain_db,
                     stream_id=streams.get(row.id),
+                    device_id=device_id,
+                    audio_backend=backend_name,
                 )
-                for row in rows
-            }
             route_rows = session.query(Route).filter_by(enabled=True).all()
-            outputs = {
-                row.id: row
-                for row in session.query(Channel).filter_by(direction="out", enabled=True).all()
-            }
-            routes: dict[int, list[tuple[str, int]]] = {}
-            for route in route_rows:
-                output = outputs.get(route.output_channel_id)
-                if output is None:
-                    continue
-                routes.setdefault(route.input_channel_id, []).append((output.alsa_device, output.sample_rate))
+            outputs = {row.id: row for row in session.query(Channel).filter_by(direction="out").all()}
+            try:
+                available = {
+                    device.id
+                    for device in self.backend.list_devices()
+                    if device.available
+                }
+            except Exception:
+                logger.exception("device scan failed")
+                available = set()
+            routes, notices = plan_routes(route_rows, outputs, available)
+            desired_specs = desired
         with self._route_lock:
             self._routes = routes
+            self._notices = notices
+        self._publish_status(desired_specs, available)
 
         stale = [channel_id for channel_id in self._workers if channel_id not in desired]
         for channel_id in stale:
@@ -128,7 +222,7 @@ class AudioService:
             thread.join(timeout=3)
             self._set_level(channel_id, 0.0)
 
-        for channel_id, spec in desired.items():
+        for channel_id, spec in desired_specs.items():
             current = self._workers.get(channel_id)
             if current and (current[0] != spec.signature or not current[2].is_alive()):
                 _sig, stop, thread = self._workers.pop(channel_id)
@@ -146,16 +240,18 @@ class AudioService:
                 self._workers[channel_id] = (spec.signature, stop, thread)
                 thread.start()
 
-    def _routes_for(self, channel_id: int) -> list[tuple[str, int]]:
+    def _routes_for(self, channel_id: int) -> list[RouteTarget]:
         with self._route_lock:
             return list(self._routes.get(channel_id, []))
 
     def _run_channel(self, spec: ChannelSpec, stop: threading.Event) -> None:
-        capture = self.backend.open_capture(spec.alsa_device, spec.sample_rate, spec.gain_db)
+        capture = self.backend.open_capture(
+            spec.device_id, spec.sample_rate, spec.gain_db, backend_name=spec.audio_backend
+        )
         try:
             capture.start()
         except Exception:
-            logger.exception("capture failed to start for %s", spec.alsa_device)
+            logger.exception("capture failed to start for %s", spec.device_id)
             return
         playbacks = []
         open_ids: list[str] = []
@@ -205,7 +301,7 @@ class AudioService:
                 try:
                     pcm = capture.read(frames)
                 except Exception:
-                    logger.exception("read failed on %s", spec.alsa_device)
+                    logger.exception("read failed on %s", spec.device_id)
                     stop.wait(1)
                     continue
                 if not pcm:
@@ -213,6 +309,7 @@ class AudioService:
                     continue
                 fanout(pcm, writer, list(playbacks), self.bus, spec.id, spec.sample_rate)
                 self._set_level(spec.id, pcm_rms(pcm))
+                self._note_playbacks(playbacks)
                 next_tick += frame_seconds
                 delay = next_tick - time.monotonic()
                 if delay > 0:
@@ -234,8 +331,17 @@ class AudioService:
 
     def _sync_playbacks(self, spec: ChannelSpec, playbacks: list, open_ids: list[str]) -> None:
         desired = self._routes_for(spec.id)
-        desired_ids = [device_id for device_id, _rate in desired]
+        desired_ids = [target.device_id for target in desired]
+        if desired_ids == open_ids and all(_playback_alive(item) for item in playbacks):
+            return
         if desired_ids == open_ids:
+            for playback in playbacks:
+                if not _playback_alive(playback):
+                    try:
+                        playback.start()
+                    except Exception:
+                        logger.exception("playback restart failed")
+            self._note_playbacks(playbacks)
             return
         for playback in playbacks:
             try:
@@ -244,15 +350,109 @@ class AudioService:
                 logger.debug("playback stop failed", exc_info=True)
         playbacks.clear()
         open_ids.clear()
-        for device_id, rate in desired:
-            playback = self.backend.open_playback(device_id, rate or spec.sample_rate)
+        for target in desired:
+            playback = self.backend.open_playback(
+                target.device_id,
+                target.sample_rate or spec.sample_rate,
+                backend_name=target.backend,
+            )
             try:
                 playback.start()
-            except Exception:
-                logger.exception("playback failed to start for %s", device_id)
-                continue
+            except Exception as exc:
+                playback.last_error = str(exc)
+                logger.exception("playback failed to start for %s", target.device_id)
             playbacks.append(playback)
-            open_ids.append(device_id)
+            open_ids.append(target.device_id)
+        self._note_playbacks(playbacks)
+
+    def _note_playbacks(self, playbacks: list) -> None:
+        reports = {}
+        for playback in playbacks:
+            if hasattr(playback, "status"):
+                report = playback.status()
+            else:
+                report = {
+                    "backend": "alsa",
+                    "device": getattr(playback, "device_id", ""),
+                    "running": True,
+                    "last_error": getattr(playback, "last_error", ""),
+                }
+            reports[str(report.get("device") or id(playback))] = report
+        with self._status_lock:
+            self._playback_status.update(reports)
+
+    def _publish_status(self, desired: dict, available: set[str]) -> None:
+        with self._route_lock:
+            notices = list(self._notices)
+            routes = {key: list(value) for key, value in self._routes.items()}
+        with self._status_lock:
+            playbacks = list(self._playback_status.values())
+        last_error = ""
+        for notice in notices:
+            if notice.get("reason") == "disconnected":
+                last_error = notice.get("detail") or last_error
+        for report in playbacks:
+            if report.get("last_error"):
+                last_error = report["last_error"]
+        selected_inputs = [
+            {
+                "id": spec.id,
+                "name": spec.name,
+                "device_id": spec.device_id,
+                "backend": spec.audio_backend,
+            }
+            for spec in desired.values()
+        ]
+        selected_outputs = []
+        for targets in routes.values():
+            for target in targets:
+                selected_outputs.append(
+                    {
+                        "id": target.output_channel_id,
+                        "name": target.output_name,
+                        "device_id": target.device_id,
+                        "backend": target.backend,
+                        "connected": target.connected,
+                        "detail": target.detail,
+                    }
+                )
+        payload = {
+            "input_backends": sorted({spec.audio_backend for spec in desired.values()}) or ["alsa"],
+            "output_backends": sorted({item.get("backend", "") for item in selected_outputs if item.get("backend")}),
+            "selected_inputs": selected_inputs,
+            "selected_outputs": selected_outputs,
+            "available_device_ids": sorted(available),
+            "notices": notices,
+            "playbacks": playbacks,
+            "last_error": last_error,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        path = Path(self.settings.data_dir) / "logs" / "audio_status.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError:
+            logger.debug("could not write audio status", exc_info=True)
+
+
+def load_audio_status(data_dir) -> dict:
+    path = Path(data_dir) / "logs" / "audio_status.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _playback_alive(playback) -> bool:
+    proc = getattr(playback, "proc", None)
+    if proc is not None and proc.poll() is not None:
+        return False
+    if getattr(playback, "last_error", "") and proc is None and getattr(playback, "_sock", None) is None:
+        return False
+    return True
 
     def _runtime(self):
         now = time.monotonic()

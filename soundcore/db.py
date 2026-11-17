@@ -54,6 +54,37 @@ def get_engine():
 
 def create_all() -> None:
     Base.metadata.create_all(get_engine())
+    migrate_schema(get_engine())
+
+
+def migrate_schema(engine=None) -> None:
+    """Add channel playback columns in place. Existing rows and other tables stay.
+
+    SQLite only. No DROP, no table rebuild. Legacy channels are marked alsa and
+    copy alsa_device into device_id.
+    """
+    engine = engine or get_engine()
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        tables = {row[0] for row in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "channels" not in tables:
+            return
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(channels)")}
+        if "audio_backend" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE channels ADD COLUMN audio_backend VARCHAR(16) DEFAULT 'alsa'"
+            )
+        if "device_id" not in columns:
+            conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN device_id VARCHAR(200) DEFAULT ''")
+        conn.exec_driver_sql(
+            "UPDATE channels SET audio_backend = 'alsa' "
+            "WHERE audio_backend IS NULL OR audio_backend = ''"
+        )
+        conn.exec_driver_sql(
+            "UPDATE channels SET device_id = alsa_device "
+            "WHERE device_id IS NULL OR device_id = ''"
+        )
 
 
 def session_factory() -> sessionmaker:

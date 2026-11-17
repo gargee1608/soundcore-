@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 User=soundcore
 Group=soundcore
+SupplementaryGroups=audio soundcore-audio
 WorkingDirectory=/opt/soundcore
+Environment=PULSE_SERVER=unix:/run/soundcore/pulse.sock
 EnvironmentFile=/etc/soundcore/soundcore.env
 ExecStart=/opt/soundcore/.venv/bin/python -m soundcore.server
 Restart=on-failure

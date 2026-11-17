@@ -20,12 +20,16 @@
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Input
       <select name="input_channel_id">
-        {% for channel in inputs %}<option value="{{ channel.id }}">{{ channel.name }}</option>{% endfor %}
+        {% for channel in inputs %}
+        <option value="{{ channel.id }}">{{ channel.name }} · {{ channel.audio_backend or 'alsa' }} · input</option>
+        {% endfor %}
       </select>
     </label>
     <label>Output
       <select name="output_channel_id">
-        {% for channel in outputs %}<option value="{{ channel.id }}">{{ channel.name }}</option>{% endfor %}
+        {% for channel in outputs %}
+        <option value="{{ channel.id }}">{{ channel.name }} · {{ channel.audio_backend or 'alsa' }} · {{ 'input' if channel.direction == 'in' else 'output' }}</option>
+        {% endfor %}
       </select>
     </label>
     <label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
@@ -40,8 +44,16 @@
       {% for route in routes %}
       <tr>
         <td>{{ names[route.input_channel_id].name if route.input_channel_id in names else route.input_channel_id }}</td>
-        <td>{{ names[route.output_channel_id].name if route.output_channel_id in names else route.output_channel_id }}</td>
-        <td>{{ 'On' if route.enabled else 'Off' }}</td>
+        {% set dest = names.get(route.output_channel_id) %}
+        <td>
+          {{ dest.name if dest else route.output_channel_id }}
+          {% if dest %}<span class="meta">{{ dest.audio_backend or 'alsa' }}</span>{% endif %}
+        </td>
+        <td>
+          {% if not route.enabled %}Off
+          {% elif dest and (dest.device_id or dest.alsa_device) not in audio.available %}Disconnected
+          {% else %}On{% endif %}
+        </td>
         <td>
           <form method="post" action="{{ url_for('pages.routing_delete', route_id=route.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

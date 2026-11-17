@@ -13,7 +13,7 @@ fi
 
 systemctl disable --now soundcore.service soundcore-worker.service 2>/dev/null || true
 rm -f /etc/systemd/system/soundcore.service /etc/systemd/system/soundcore-worker.service
-rm -f /usr/local/bin/soundcore-passwd
+rm -f /usr/local/bin/soundcore-passwd /usr/local/bin/soundcore-audio-diagnostics
 systemctl daemon-reload
 
 if [[ "${1:-}" == "--purge" ]]; then

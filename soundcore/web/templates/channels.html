@@ -5,7 +5,33 @@
 <section class="page-head">
   <div>
     <h1>Name every device</h1>
-    <p class="lede">One USB card is one channel. The 3.5 mm input is just another capture device. Enabling an input starts its recording stream, and the cap on the desk still applies.</p>
+    <p class="lede">USB capture stays on ALSA. Bluetooth and other Pulse sinks are PipeWire outputs. A card that is only storage or HID is not an input. Simulated devices are not listed as hardware.</p>
+  </div>
+  <form method="post" action="{{ url_for('pages.channels_rescan') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn ghost" type="submit">Rescan</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Audio diagnostics</h2>
+  <div class="diag">
+    <p><span>Input backends</span> {{ audio.input_backends | join(', ') or 'none' }}</p>
+    <p><span>Output backends</span> {{ audio.output_backends | join(', ') or 'none' }}</p>
+    <p><span>Bluetooth</span> {{ 'connected' if audio.bluetooth_connected else 'not connected' }}{% if audio.bluetooth %} — {{ audio.bluetooth | map(attribute='name') | join(', ') }}{% endif %}</p>
+    <p><span>PipeWire sinks</span> {% if audio.sinks %}{% for device in audio.sinks %}{{ device.name }} ({{ 'up' if device.available else 'down' }}){% if not loop.last %}, {% endif %}{% endfor %}{% else %}none{% endif %}</p>
+    <p><span>PipeWire sources</span> {% if audio.sources %}{% for device in audio.sources %}{{ device.name }}{% if not loop.last %}, {% endif %}{% endfor %}{% else %}none{% endif %}</p>
+    <p><span>Selected outputs</span>
+      {% if audio.snapshot.selected_outputs %}
+        {% for item in audio.snapshot.selected_outputs %}{{ item.name }} via {{ item.backend }}{% if not item.connected %} (disconnected){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}
+      {% else %}none reported by the worker yet{% endif %}
+    </p>
+    <p><span>Playback</span>
+      {% if audio.snapshot.playbacks %}
+        {% for item in audio.snapshot.playbacks %}{{ item.device }} {{ 'running' if item.running else 'stopped' }}{% if item.last_error %} — {{ item.last_error }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}
+      {% else %}no playback process reported{% endif %}
+    </p>
+    <p><span>Last audio error</span> {{ audio.snapshot.last_error or audio.error or 'none' }}</p>
   </div>
 </section>
 
@@ -17,12 +43,14 @@
     <form method="post" action="{{ url_for('pages.channels_save') }}" class="device-add">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="alsa_device" value="{{ device.id }}">
+      <input type="hidden" name="device_id" value="{{ device.id }}">
+      <input type="hidden" name="audio_backend" value="{{ device.backend }}">
       <input type="hidden" name="direction" value="{{ device.direction }}">
       <input type="hidden" name="device_kind" value="{{ device.kind }}">
       <input type="hidden" name="usb_id" value="{{ device.usb_id or '' }}">
       <div>
         <strong>{{ device.name }}</strong>
-        <span>{{ device.kind }} · {{ 'input' if device.direction == 'in' else 'output' }} · <code>{{ device.id }}</code></span>
+        <span>Backend {{ device.backend }} · Direction {{ 'input' if device.direction == 'in' else 'output' }} · {{ device.kind }} · <code>{{ device.id }}</code></span>
       </div>
       <label>Name <input name="name" value="{{ device.name }}" required></label>
       <label>Rate
@@ -40,7 +68,7 @@
 {% else %}
 <section class="empty slim">
   <h2>No new devices</h2>
-  <p>Everything the {{ audio_backend_name }} backend can see is already a channel. Plug in a card and reload this page to scan again.</p>
+  <p>Everything the scanner can see is already a channel. Plug in a card or connect a speaker, then use Rescan.</p>
 </section>
 {% endif %}
 
@@ -50,14 +78,20 @@
   <p class="muted">Nothing saved yet.</p>
   {% endif %}
   {% for channel in channels %}
+  {% set device_key = channel.device_id or channel.alsa_device %}
   <form method="post" action="{{ url_for('pages.channels_save') }}" class="channel-edit">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="channel_id" value="{{ channel.id }}">
     <input type="hidden" name="direction" value="{{ channel.direction }}">
     <input type="hidden" name="device_kind" value="{{ channel.device_kind }}">
     <input type="hidden" name="usb_id" value="{{ channel.usb_id or '' }}">
+    <input type="hidden" name="audio_backend" value="{{ channel.audio_backend or 'alsa' }}">
+    <input type="hidden" name="device_id" value="{{ device_key }}">
     <label>Name <input name="name" value="{{ channel.name }}" required></label>
-    <label>Device <input name="alsa_device" value="{{ channel.alsa_device }}" required></label>
+    <label>Device
+      <input name="alsa_device" value="{{ device_key }}" required>
+      <span class="meta">Backend {{ channel.audio_backend or 'alsa' }} · Direction {{ 'input' if channel.direction == 'in' else 'output' }}{% if device_key not in audio.available %} · disconnected{% endif %}</span>
+    </label>
     <label>Rate
       <select name="sample_rate">
         {% for rate in rates %}<option value="{{ rate }}" {% if rate == channel.sample_rate %}selected{% endif %}>{{ rate }}</option>{% endfor %}

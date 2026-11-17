@@ -1,0 +1,12 @@
+[Unit]
+Description=Group-enable the SoundCore PipeWire pulse socket
+After=pipewire-pulse.service
+PartOf=pipewire-pulse.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/soundcore/scripts/pulse_socket_access.sh
+
+[Install]
+WantedBy=pipewire-pulse.service

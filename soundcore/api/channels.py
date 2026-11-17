@@ -10,7 +10,15 @@ bp = Blueprint("channels_api", __name__)
 def _devices():
     backend = current_app.extensions["audio_backend"]
     return [
-        {"id": device.id, "name": device.name, "direction": device.direction, "kind": device.kind, "usb_id": device.usb_id}
+        {
+            "id": device.id,
+            "name": device.name,
+            "direction": device.direction,
+            "kind": device.kind,
+            "usb_id": device.usb_id,
+            "backend": device.backend,
+            "available": device.available,
+        }
         for device in backend.list_devices()
     ]
 
@@ -29,6 +37,8 @@ def list_channels():
                     "slug": row.slug,
                     "direction": row.direction,
                     "alsa_device": row.alsa_device,
+                    "device_id": row.device_id or row.alsa_device,
+                    "audio_backend": row.audio_backend or "alsa",
                     "usb_id": row.usb_id,
                     "kind": row.device_kind,
                     "sample_rate": row.sample_rate,
@@ -89,4 +99,6 @@ def _fields(payload: dict) -> dict:
         "direction": payload.get("direction") or "in",
         "device_kind": payload.get("device_kind") or payload.get("kind") or "usb",
         "usb_id": payload.get("usb_id"),
+        "audio_backend": payload.get("audio_backend") or payload.get("backend") or "",
+        "device_id": payload.get("device_id") or "",
     }

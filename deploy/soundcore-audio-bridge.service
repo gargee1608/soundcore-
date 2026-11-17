@@ -1,0 +1,12 @@
+[Unit]
+Description=SoundCore localhost playback bridge (PipeWire fallback)
+After=pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=/opt/soundcore/.venv/bin/python /opt/soundcore/scripts/audio_bridge.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=pipewire-pulse.service

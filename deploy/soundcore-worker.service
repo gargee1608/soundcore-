@@ -7,14 +7,16 @@ Wants=network-online.target
 Type=simple
 User=soundcore
 Group=soundcore
+SupplementaryGroups=audio soundcore-audio
 WorkingDirectory=/opt/soundcore
+Environment=PULSE_SERVER=unix:/run/soundcore/pulse.sock
 EnvironmentFile=/etc/soundcore/soundcore.env
+ExecStartPre=/opt/soundcore/scripts/wait_for_pulse_socket.sh
 ExecStart=/opt/soundcore/.venv/bin/python -m soundcore.worker
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
-SupplementaryGroups=audio
 
 [Install]
 WantedBy=multi-user.target

@@ -82,6 +82,10 @@ class Channel(Base):
     slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     direction: Mapped[str] = mapped_column(String(8), nullable=False)  # in | out
     alsa_device: Mapped[str] = mapped_column(String(160), nullable=False)
+    # device_id is the canonical id (plughw:... or pipewire:...). alsa_device
+    # is kept in sync so rows written before this column still play.
+    audio_backend: Mapped[str] = mapped_column(String(16), nullable=False, default="alsa")
+    device_id: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     usb_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     device_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="usb")
     sample_rate: Mapped[int] = mapped_column(Integer, nullable=False, default=16000)
