@@ -175,6 +175,10 @@ def save_route(session, input_id: int, output_id: int, enabled: bool = True) -> 
         raise OpsError("Pick an output channel.")
     if input_id == output_id:
         raise OpsError("A channel cannot route to itself.")
+    src_dev = (src.device_id or src.alsa_device or "").strip()
+    dst_dev = (dst.device_id or dst.alsa_device or "").strip()
+    if src_dev and dst_dev and src_dev == dst_dev:
+        raise OpsError("Input and output share the same audio device; routing would cause feedback.")
     route = (
         session.query(Route)
         .filter_by(input_channel_id=input_id, output_channel_id=output_id)

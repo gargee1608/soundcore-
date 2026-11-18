@@ -4,8 +4,8 @@
 {% block content %}
 <section class="page-head">
   <div>
-    <h1>Channels on the air</h1>
-    <p class="lede">Enabled inputs record continuously. Pick one to listen in the browser, or route it to a USB output without stopping the file.</p>
+    <h1>Broadcast cockpit</h1>
+    <p class="lede">Live inputs, USB outputs, and routing at a glance. Metrics refresh every second from the worker — not simulated.</p>
   </div>
   <a class="btn solid" href="{{ url_for('pages.channels') }}">Configure channels</a>
 </section>
@@ -18,23 +18,18 @@
   </span>
 </div>
 
-<section class="stats" id="stats">
-  <article>
-    <span>Active streams</span>
-    <strong id="stat-streams">{{ status.capacity.active }}<small>/ {{ status.capacity.cap }}</small></strong>
-  </article>
-  <article>
-    <span>Open files</span>
-    <strong id="stat-open">{{ status.counts.open_recordings }}</strong>
-  </article>
-  <article>
-    <span>Disk free</span>
-    <strong id="stat-free">{{ (status.disk.free_ratio * 100)|round(0) }}<small>%</small></strong>
-  </article>
-  <article>
-    <span>Transcripts waiting</span>
-    <strong id="stat-tx">{{ status.counts.pending_transcriptions }}</strong>
-  </article>
+{% set ck = status.cockpit %}
+<section class="stats cockpit-stats" id="stats">
+  <article><span>Total streams</span><strong id="ck-total">{{ ck.total_streams }}</strong></article>
+  <article><span>Connected</span><strong id="ck-connected">{{ ck.connected_streams }}</strong></article>
+  <article><span>Disconnected</span><strong id="ck-disconnected">{{ ck.disconnected_streams }}</strong></article>
+  <article><span>USB outputs live</span><strong id="ck-usb">{{ ck.active_usb_outputs }}</strong></article>
+  <article><span>Recording</span><strong id="ck-rec">{{ ck.active_recordings }}</strong></article>
+  <article><span>Broadcasts</span><strong id="ck-broadcast">{{ ck.active_broadcasts }}</strong></article>
+  <article><span>In level</span><strong id="ck-in">{{ (ck.incoming_activity * 100)|round(0) }}<small>%</small></strong></article>
+  <article><span>Out level</span><strong id="ck-out">{{ (ck.outgoing_activity * 100)|round(0) }}<small>%</small></strong></article>
+  <article><span>Pi health</span><strong id="ck-health" data-level="{{ ck.system_health.level }}">{{ ck.system_health.level }}</strong></article>
+  <article><span>CPU / RAM / °C</span><strong id="ck-sys">{% if ck.system_health.cpu_percent is not none %}{{ ck.system_health.cpu_percent }}%{% else %}—{% endif %} · {{ ((1 - ck.system_health.memory.used_ratio) * 100)|round(0) }}% free{% if ck.system_health.temperature_c %} · {{ ck.system_health.temperature_c }}°C{% endif %}</strong></article>
 </section>
 
 {% set inputs = status.channels | selectattr('direction', 'equalto', 'in') | list %}
@@ -60,7 +55,8 @@
     <div class="meter" aria-hidden="true"><span data-meter="{{ channel.id }}" style="width: {{ [channel.level * 140, 100]|min }}%"></span></div>
     <footer>
       <button type="button" class="btn listen" data-listen="{{ channel.id }}" {% if not channel.enabled %}disabled{% endif %}>Listen</button>
-      <span class="route" data-route="{{ channel.id }}">{% if route %}Relay → {{ route.output }}{% else %}No relay{% endif %}</span>
+      {% set out_routes = status.routes | selectattr('input_id', 'equalto', channel.id) | list %}
+      <span class="route" data-route="{{ channel.id }}">{% if out_routes %}Relay → {{ out_routes | map(attribute='output') | join(', ') }}{% else %}No relay{% endif %}</span>
     </footer>
   </article>
   {% endfor %}

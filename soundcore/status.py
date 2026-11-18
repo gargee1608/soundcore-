@@ -6,6 +6,7 @@ from soundcore.capacity import evaluate_capacity
 from soundcore.models import Channel, Event, Recording, Route, StorageState, Transcription
 from soundcore.settings_store import load_runtime
 from soundcore.storage.guard import admission, measure_disk
+from soundcore.system_health import snapshot as system_snapshot
 
 
 def console_status(session, settings, audio=None) -> dict:
@@ -58,6 +59,12 @@ def console_status(session, settings, audio=None) -> dict:
         .filter(Transcription.status.in_(["pending", "retrying", "running"]))
         .count()
     )
+    enabled_inputs = [c for c in inputs if c.enabled]
+    connected_inputs = [c for c in enabled_inputs if levels.get(c.id, 0.0) > 0.002]
+    enabled_outputs = [c for c in outputs if c.enabled]
+    active_outputs = [c for c in enabled_outputs if levels.get(c.id, 0.0) > 0.002]
+    active_routes = len(route_labels)
+    health = system_snapshot(disk_level=disk_level, capacity_level=capacity.level)
     return {
         "capacity": capacity.as_dict(),
         "disk": {
@@ -110,5 +117,16 @@ def console_status(session, settings, audio=None) -> dict:
             "chunk_seconds": runtime.chunk_seconds,
             "timezone": runtime.timezone,
             "transcribe_enabled": runtime.transcribe_enabled,
+        },
+        "cockpit": {
+            "total_streams": len(inputs),
+            "connected_streams": len(connected_inputs),
+            "disconnected_streams": max(0, len(enabled_inputs) - len(connected_inputs)),
+            "active_usb_outputs": len(active_outputs),
+            "active_recordings": open_recordings,
+            "active_broadcasts": active_routes,
+            "incoming_activity": round(max((levels.get(c.id, 0.0) for c in inputs), default=0.0), 4),
+            "outgoing_activity": round(max((levels.get(c.id, 0.0) for c in outputs), default=0.0), 4),
+            "system_health": health,
         },
     }

@@ -30,21 +30,47 @@
 
   function paint(status) {
     banner(status);
-    const counts = status.counts || {};
-    const cap = status.capacity || {};
     const disk = status.disk || {};
-    const streams = document.getElementById("stat-streams");
-    if (streams) streams.innerHTML = String(cap.active) + '<small>/ ' + cap.cap + "</small>";
-    const open = document.getElementById("stat-open");
-    if (open) open.textContent = counts.open_recordings;
-    const free = document.getElementById("stat-free");
-    if (free && disk.free_ratio != null) {
-      free.innerHTML = String(Math.round(disk.free_ratio * 100)) + "<small>%</small>";
+    const cap = status.capacity || {};
+    const ck = status.cockpit || {};
+    const health = ck.system_health || {};
+    function set(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
     }
-    const tx = document.getElementById("stat-tx");
-    if (tx) tx.textContent = counts.pending_transcriptions;
-    const routes = {};
-    (status.routes || []).forEach(function (route) { routes[route.input_id] = route.output; });
+    set("ck-total", ck.total_streams != null ? ck.total_streams : "—");
+    set("ck-connected", ck.connected_streams != null ? ck.connected_streams : "—");
+    set("ck-disconnected", ck.disconnected_streams != null ? ck.disconnected_streams : "—");
+    set("ck-usb", ck.active_usb_outputs != null ? ck.active_usb_outputs : "—");
+    set("ck-rec", ck.active_recordings != null ? ck.active_recordings : "—");
+    set("ck-broadcast", ck.active_broadcasts != null ? ck.active_broadcasts : "—");
+    const inEl = document.getElementById("ck-in");
+    if (inEl && ck.incoming_activity != null) {
+      inEl.innerHTML = String(Math.round(ck.incoming_activity * 100)) + "<small>%</small>";
+    }
+    const outEl = document.getElementById("ck-out");
+    if (outEl && ck.outgoing_activity != null) {
+      outEl.innerHTML = String(Math.round(ck.outgoing_activity * 100)) + "<small>%</small>";
+    }
+    const healthEl = document.getElementById("ck-health");
+    if (healthEl && health.level) {
+      healthEl.textContent = health.level;
+      healthEl.dataset.level = health.level;
+    }
+    const sysEl = document.getElementById("ck-sys");
+    if (sysEl) {
+      const mem = health.memory || {};
+      const cpu = health.cpu_percent != null ? health.cpu_percent + "%" : "—";
+      const memFree = mem.used_ratio != null ? Math.round((1 - mem.used_ratio) * 100) + "% free" : "";
+      const temp = health.temperature_c != null ? " · " + health.temperature_c + "°C" : "";
+      sysEl.textContent = cpu + " · " + memFree + temp;
+    }
+    if (disk.level && disk.level !== "ok") banner(status);
+    const routeMap = {};
+    (status.routes || []).forEach(function (route) {
+      if (!routeMap[route.input_id]) routeMap[route.input_id] = [];
+      routeMap[route.input_id].push(route.output);
+    });
     (status.channels || []).forEach(function (channel) {
       const meter = document.querySelector('[data-meter="' + channel.id + '"]');
       if (meter) {
@@ -58,7 +84,10 @@
         pill.classList.toggle("idle", !channel.enabled);
       }
       const route = document.querySelector('[data-route="' + channel.id + '"]');
-      if (route) route.textContent = routes[channel.id] ? "Relay → " + routes[channel.id] : "No relay";
+      if (route) {
+        const outs = routeMap[channel.id] || [];
+        route.textContent = outs.length ? "Relay → " + outs.join(", ") : "No relay";
+      }
       const listen = document.querySelector('[data-listen="' + channel.id + '"]');
       if (listen) listen.disabled = !channel.enabled && listen.dataset.live !== "1";
     });

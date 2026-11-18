@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from soundcore.audio.naming import build_recording_relative_path, new_unique_id
 from soundcore.ops import channel_endpoint
 from soundcore.audio.pcm import pcm_rms
+from soundcore.audio.mixer import MixOutputSpec, MixSource, OutputMixer
 from soundcore.audio.recorder import WavRecorder, fanout
 from soundcore.db import session_scope
 from soundcore.models import Channel, Recording, Route, StorageState, Stream, utcnow
@@ -142,6 +143,7 @@ class AudioService:
         self._runtime_at = 0.0
         self._flow: dict[int, dict] = {}
         self._flow_lock = threading.Lock()
+        self._mixer = OutputMixer(backend)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -158,6 +160,7 @@ class AudioService:
         for _sig, _stop_evt, thread in workers:
             thread.join(timeout=3)
         self._workers.clear()
+        self._mixer.stop()
         if self._thread:
             self._thread.join(timeout=3)
 
@@ -167,7 +170,10 @@ class AudioService:
 
     def levels(self) -> dict[int, float]:
         with self._level_lock:
-            return dict(self._levels)
+            merged = dict(self._levels)
+        for output_id, level in self._mixer.output_levels().items():
+            merged[output_id] = level
+        return merged
 
     def _set_level(self, channel_id: int, value: float) -> None:
         with self._level_lock:
@@ -216,6 +222,7 @@ class AudioService:
         with self._route_lock:
             self._routes = routes
             self._notices = notices
+        self._reconfigure_mixer(desired_specs, route_rows, outputs, available)
         self._publish_status(desired_specs, available)
 
         stale = [channel_id for channel_id in self._workers if channel_id not in desired]
@@ -330,6 +337,44 @@ class AudioService:
         with self._route_lock:
             return list(self._routes.get(channel_id, []))
 
+    def _reconfigure_mixer(
+        self,
+        desired: dict[int, ChannelSpec],
+        route_rows,
+        outputs_by_id: dict[int, Channel],
+        available: set[str],
+    ) -> None:
+        by_output: dict[int, list[MixSource]] = {}
+        for route in route_rows:
+            spec = desired.get(route.input_channel_id)
+            output = outputs_by_id.get(route.output_channel_id)
+            if spec is None or output is None or not output.enabled:
+                continue
+            device_id, backend = channel_endpoint(output)
+            if device_id not in available:
+                continue
+            by_output.setdefault(route.output_channel_id, []).append(
+                MixSource(route.input_channel_id, spec.gain_db)
+            )
+        mix_specs: list[MixOutputSpec] = []
+        for output_id, sources in by_output.items():
+            output = outputs_by_id[output_id]
+            device_id, backend = channel_endpoint(output)
+            mix_specs.append(
+                MixOutputSpec(
+                    output_channel_id=output_id,
+                    device_id=device_id,
+                    backend=backend,
+                    sample_rate=output.sample_rate,
+                    name=output.name,
+                    sources=sources,
+                )
+            )
+        try:
+            self._mixer.reconfigure(mix_specs)
+        except Exception:
+            logger.exception("output mixer reconfigure failed")
+
     def _run_channel(self, spec: ChannelSpec, stop: threading.Event) -> None:
         capture = self.backend.open_capture(
             spec.device_id, spec.sample_rate, spec.gain_db, backend_name=spec.audio_backend
@@ -339,8 +384,6 @@ class AudioService:
         except Exception:
             logger.exception("capture failed to start for %s", spec.device_id)
             return
-        playbacks = []
-        open_ids: list[str] = []
         writer: WavRecorder | None = None
         recording_id: int | None = None
         chunk_started = 0.0
@@ -353,7 +396,6 @@ class AudioService:
         next_tick = time.monotonic()
         try:
             while not stop.is_set():
-                self._sync_playbacks(spec, playbacks, open_ids)
                 runtime = self._runtime()
                 now_mono = time.monotonic()
                 # SanketPTT is quiet between calls. Do not open a WAV for that
@@ -416,7 +458,9 @@ class AudioService:
                 if not pcm:
                     stop.wait(0.2)
                     continue
-                fanout(pcm, writer, list(playbacks), self.bus, spec.id, spec.sample_rate)
+                fanout(pcm, writer, [], self.bus, spec.id, spec.sample_rate)
+                if self._routes_for(spec.id):
+                    self._mixer.feed(spec.id, pcm)
                 level = pcm_rms(pcm)
                 self._set_level(spec.id, level)
                 state = "receiving" if spec.audio_backend == "sanketptt" else "capturing"
@@ -436,7 +480,6 @@ class AudioService:
                         f"Transmission on {spec.name}",
                         channel=spec.slug,
                     )
-                self._note_playbacks(playbacks)
                 next_tick += frame_seconds
                 delay = next_tick - time.monotonic()
                 if delay > 0:
@@ -445,11 +488,6 @@ class AudioService:
                     next_tick = time.monotonic()
         finally:
             self._finalize(recording_id, writer)
-            for playback in playbacks:
-                try:
-                    playback.stop()
-                except Exception:
-                    logger.debug("playback stop failed", exc_info=True)
             try:
                 capture.stop()
             except Exception:
@@ -521,8 +559,10 @@ class AudioService:
         with self._route_lock:
             notices = list(self._notices)
             routes = {key: list(value) for key, value in self._routes.items()}
+        playbacks = self._mixer.playback_reports()
         with self._status_lock:
-            playbacks = list(self._playback_status.values())
+            self._playback_status = {str(item.get("device") or i): item for i, item in enumerate(playbacks)}
+        out_levels = self._mixer.output_levels()
         last_error = ""
         for notice in notices:
             if notice.get("reason") == "disconnected":
@@ -562,6 +602,7 @@ class AudioService:
             "playbacks": playbacks,
             "last_error": last_error,
             "flow": self._flow_snapshot(),
+            "output_levels": {str(k): round(v, 4) for k, v in out_levels.items()},
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         path = Path(self.settings.data_dir) / "logs" / "audio_status.json"
