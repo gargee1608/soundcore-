@@ -12,9 +12,11 @@ card 2: Headset [Plantronics Headset], device 0: USB Audio [USB Audio]
 
 def test_parse_capture_cards():
     devices = parse_alsa_listing(SAMPLE, direction="in")
-    assert devices[0].id == "plughw:0,0"
+    assert devices[0].id == "alsa:local:Headphones:pcm0"
     assert devices[0].kind == "jack"
-    assert devices[0].name.startswith("3.5 mm")
+    assert devices[0].hw == "plughw:0,0"
+    assert not devices[0].name.startswith("3.5")
+    assert "Headphones" in devices[0].name
     assert devices[1].kind == "usb"
     assert devices[1].id == "alsa:usb-cardid:CODEC:pcm0"
     assert devices[1].usb_id == "usb-cardid:CODEC:pcm0"

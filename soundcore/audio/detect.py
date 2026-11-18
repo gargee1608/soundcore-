@@ -113,14 +113,18 @@ def parse_alsa_listing(
             token = tokens.get((card, pcm)) or f"usb-cardid:{short or 'card'}:pcm{pcm}"
             device_id = f"alsa:{token}"
             usb_id = token
+        elif kind == "jack" and direction == "in":
+            # Onboard capture keeps the ALSA card id, not the card number,
+            # and is not labeled as a 3.5 mm jack unless the card says so.
+            token = f"local:{short or 'onboard'}:pcm{pcm}"
+            device_id = f"alsa:{token}"
+            usb_id = token
         else:
             device_id = hw
             usb_id = None
         if device_id in seen:
             continue
         seen.add(device_id)
-        if kind == "jack" and direction == "in":
-            label = f"3.5 mm {label}"
         devices.append(
             DeviceInfo(
                 id=device_id,

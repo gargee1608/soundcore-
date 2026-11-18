@@ -239,10 +239,11 @@ class AudioService:
                 logger.exception("device scan failed")
                 scanned = []
             if getattr(self.backend, "name", "") in {"alsa", "hybrid"}:
-                from soundcore.ops import sync_usb_output_slots
+                from soundcore.ops import sync_local_inputs, sync_usb_output_slots
 
                 present = sync_usb_output_slots(session, scanned)
                 self._note_usb(session, present)
+                sync_local_inputs(session, scanned)
             available = {device.id for device in scanned if device.available}
             outputs = {row.id: row for row in session.query(Channel).filter_by(direction="out").all()}
             inputs_all = {row.id: row for row in session.query(Channel).filter_by(direction="in").all()}

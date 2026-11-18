@@ -112,6 +112,28 @@ def test_replug_keeps_the_same_slot(data_dir):
     assert two.usb_id == "usb-path:port-b:pcm0"
 
 
+def test_local_capture_is_pinned_without_inventing_a_jack(data_dir):
+    from soundcore.ops import sync_local_inputs
+
+    moved = """
+card 4: Headphones [bcm2835 Headphones], device 0: bcm2835 Headphones [bcm2835 Headphones]
+"""
+    first = next(device for device in parse_alsa_listing(LISTING_A, direction="in") if device.kind == "jack")
+    second = next(device for device in parse_alsa_listing(moved, direction="in") if device.kind == "jack")
+    assert first.id == second.id == "alsa:local:Headphones:pcm0"
+    assert first.hw == "plughw:0,0"
+    assert second.hw == "plughw:4,0"
+    with session_scope() as db:
+        assert sync_local_inputs(db, []) == []
+        assert db.query(Channel).count() == 0
+        found = sync_local_inputs(db, [second])
+        row = db.query(Channel).one()
+    assert found[0]["id"] == "alsa:local:Headphones:pcm0"
+    assert row.device_kind == "local"
+    assert row.direction == "in"
+    assert "3.5" not in row.name
+
+
 def test_connect_and_disconnect_are_logged(data_dir):
     from soundcore.audio.service import AudioService
     from soundcore.config import Settings

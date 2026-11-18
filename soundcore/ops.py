@@ -225,6 +225,44 @@ def sync_usb_output_slots(session, devices) -> list[dict]:
     ]
 
 
+def sync_local_inputs(session, devices) -> list[dict]:
+    """Pin each real non-USB capture device. Create nothing when none is present."""
+    local = [
+        device
+        for device in devices
+        if device.direction == "in" and (device.usb_id or "").startswith("local:")
+    ]
+    seen = []
+    for device in local:
+        row = session.query(Channel).filter_by(device_id=device.id).one_or_none()
+        if row is None:
+            slug = f"local-input-{device.usb_id.replace(':', '-')}"[:64]
+            row = Channel(
+                name=device.name,
+                slug=slug,
+                direction="in",
+                alsa_device=device.hw or device.id,
+                audio_backend="alsa",
+                device_id=device.id,
+                usb_id=device.usb_id,
+                device_kind="local",
+                sample_rate=device.sample_rate if getattr(device, "sample_rate", None) else 16000,
+                format="s16le",
+                gain_db=0.0,
+                enabled=False,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            session.add(row)
+        else:
+            row.alsa_device = device.hw or row.alsa_device
+            row.usb_id = device.usb_id
+            row.device_kind = "local"
+        seen.append({"id": device.id, "name": device.name, "hw": device.hw})
+    session.flush()
+    return seen
+
+
 def delete_channel(session, channel_id: int) -> str:
     from soundcore.models import Recording
 
