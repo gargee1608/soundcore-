@@ -85,6 +85,10 @@ def migrate_schema(engine=None) -> None:
             "UPDATE channels SET device_id = alsa_device "
             "WHERE device_id IS NULL OR device_id = ''"
         )
+        if "routes" in tables:
+            route_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(routes)")}
+            if "gain_db" not in route_columns:
+                conn.exec_driver_sql("ALTER TABLE routes ADD COLUMN gain_db FLOAT DEFAULT 0")
 
 
 def session_factory() -> sessionmaker:

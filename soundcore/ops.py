@@ -247,7 +247,7 @@ def delete_channel(session, channel_id: int) -> str:
     return "deleted"
 
 
-def save_route(session, input_id: int, output_id: int, enabled: bool = True) -> Route:
+def save_route(session, input_id: int, output_id: int, enabled: bool = True, gain_db: float = 0.0) -> Route:
     src = session.get(Channel, input_id)
     dst = session.get(Channel, output_id)
     if src is None or src.direction != "in":
@@ -256,6 +256,12 @@ def save_route(session, input_id: int, output_id: int, enabled: bool = True) -> 
         raise OpsError("Pick an output channel.")
     if input_id == output_id:
         raise OpsError("A channel cannot route to itself.")
+    from soundcore.audio.service import same_device
+
+    if same_device(src, dst):
+        raise OpsError("That route would feed this output back into the same device.")
+    if gain_db < -24 or gain_db > 24:
+        raise OpsError("Route gain must stay between -24 and +24 dB.")
     route = (
         session.query(Route)
         .filter_by(input_channel_id=input_id, output_channel_id=output_id)
@@ -271,5 +277,6 @@ def save_route(session, input_id: int, output_id: int, enabled: bool = True) -> 
         session.add(route)
     else:
         route.enabled = enabled
+    route.gain_db = gain_db
     session.flush()
     return route

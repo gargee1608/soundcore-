@@ -56,9 +56,21 @@ class RouteTarget:
     output_name: str
     connected: bool
     detail: str
+    gain_db: float = 0.0
 
 
-def plan_routes(route_rows, outputs_by_id, available_ids: set[str]) -> tuple[dict[int, list[RouteTarget]], list[dict]]:
+def same_device(src, dst) -> bool:
+    """True when routing src to dst would play a device back into itself."""
+    src_usb = (getattr(src, "usb_id", None) or "").strip()
+    dst_usb = (getattr(dst, "usb_id", None) or "").strip()
+    if src_usb and src_usb == dst_usb and not src_usb.startswith("usb-ambiguous"):
+        return True
+    src_id = (getattr(src, "device_id", None) or getattr(src, "alsa_device", None) or "").strip()
+    dst_id = (getattr(dst, "device_id", None) or getattr(dst, "alsa_device", None) or "").strip()
+    return bool(src_id) and src_id == dst_id
+
+
+def plan_routes(route_rows, outputs_by_id, available_ids: set[str], inputs_by_id=None) -> tuple[dict[int, list[RouteTarget]], list[dict]]:
     """Keep a route even when its sink is gone, and say so instead of dropping it.
 
     Disabled outputs and missing channel rows are reported too. Only enabled
@@ -94,6 +106,21 @@ def plan_routes(route_rows, outputs_by_id, available_ids: set[str]) -> tuple[dic
                 }
             )
             continue
+        source = (inputs_by_id or {}).get(route.input_channel_id)
+        if source is not None and same_device(source, output):
+            notices.append(
+                {
+                    "input_channel_id": route.input_channel_id,
+                    "output_channel_id": output.id,
+                    "device_id": device_id,
+                    "backend": backend,
+                    "name": output.name,
+                    "reason": "feedback",
+                    "detail": f"{output.name} is the same device as the input",
+                    "connected": False,
+                }
+            )
+            continue
         connected = device_id in available_ids
         detail = "" if connected else f"{output.name} is not available ({device_id})"
         if not connected:
@@ -118,6 +145,7 @@ def plan_routes(route_rows, outputs_by_id, available_ids: set[str]) -> tuple[dic
             output_name=output.name,
             connected=connected,
             detail=detail,
+            gain_db=float(getattr(route, "gain_db", 0.0) or 0.0),
         )
         plan.setdefault(route.input_channel_id, []).append(target)
     return plan, notices
@@ -143,6 +171,9 @@ class AudioService:
         self._flow: dict[int, dict] = {}
         self._flow_lock = threading.Lock()
         self._usb_present: set[str] | None = None
+        from soundcore.audio.mixer import MixerBank
+
+        self.mixers = MixerBank(self._open_output, self._hw_for)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -159,6 +190,7 @@ class AudioService:
         for _sig, _stop_evt, thread in workers:
             thread.join(timeout=3)
         self._workers.clear()
+        self.mixers.stop()
         if self._thread:
             self._thread.join(timeout=3)
 
@@ -213,7 +245,9 @@ class AudioService:
                 self._note_usb(session, present)
             available = {device.id for device in scanned if device.available}
             outputs = {row.id: row for row in session.query(Channel).filter_by(direction="out").all()}
-            routes, notices = plan_routes(route_rows, outputs, available)
+            inputs_all = {row.id: row for row in session.query(Channel).filter_by(direction="in").all()}
+            routes, notices = plan_routes(route_rows, outputs, available, inputs_all)
+            self.mixers.apply(routes)
             desired_specs = desired
             self._sync_sanket(session, rows)
         with self._route_lock:
@@ -317,6 +351,9 @@ class AudioService:
             level="info" if result["ok"] else "error",
         )
         return result
+
+    def _open_output(self, device_id: str, sample_rate: int, backend: str):
+        return self.backend.open_playback(device_id, sample_rate, backend_name=backend)
 
     def _hw_for(self, device_id: str) -> str:
         resolve = getattr(self.backend, "resolve", None)
@@ -425,7 +462,6 @@ class AudioService:
         next_tick = time.monotonic()
         try:
             while not stop.is_set():
-                self._sync_playbacks(spec, playbacks, open_ids)
                 runtime = self._runtime()
                 now_mono = time.monotonic()
                 # SanketPTT is quiet between calls. Do not open a WAV for that
@@ -488,7 +524,8 @@ class AudioService:
                 if not pcm:
                     stop.wait(0.2)
                     continue
-                fanout(pcm, writer, list(playbacks), self.bus, spec.id, spec.sample_rate)
+                fanout(pcm, writer, [], self.bus, spec.id, spec.sample_rate)
+                self.mixers.push(spec.id, pcm)
                 level = pcm_rms(pcm)
                 self._set_level(spec.id, level)
                 state = "receiving" if spec.audio_backend == "sanketptt" else "capturing"

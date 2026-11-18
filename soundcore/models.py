@@ -212,6 +212,7 @@ class Route(Base):
     input_channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     output_channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), index=True)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    gain_db: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
