@@ -10,7 +10,7 @@ from flask import (
     url_for,
 )
 
-from soundcore.activity import build_activity
+from soundcore.activity import build_activity, record_activity
 from soundcore.audio.detect import AudioBackendError
 from soundcore.audio.sanketptt import (
     default_device_name,
@@ -389,13 +389,21 @@ def routing():
 @login_required
 def routing_save():
     try:
-        save_route(
+        route = save_route(
             g.db,
             int(request.form["input_channel_id"]),
             int(request.form["output_channel_id"]),
-            enabled=request.form.get("enabled", "on") == "on",
+            enabled=request.form.get("enabled") == "on",
+            gain_db=float(request.form.get("gain_db") or 0),
         )
-        flash("Route saved. Audio keeps recording while it is relayed.", "ok")
+        record_activity(
+            "route_changed",
+            f"Route {route.input_channel_id} -> {route.output_channel_id} "
+            f"{'on' if route.enabled else 'off'} at {route.gain_db:+.1f} dB",
+            channel=str(route.input_channel_id),
+            session=g.db,
+        )
+        flash("Route saved. The mix updates without reopening a healthy output.", "ok")
     except (OpsError, KeyError, ValueError) as exc:
         flash(str(exc), "error")
     return redirect(url_for("pages.routing"))
@@ -406,6 +414,12 @@ def routing_save():
 def routing_delete(route_id: int):
     route = g.db.get(Route, route_id)
     if route is not None:
+        record_activity(
+            "route_stopped",
+            f"Route {route.input_channel_id} -> {route.output_channel_id} removed",
+            channel=str(route.input_channel_id),
+            session=g.db,
+        )
         g.db.delete(route)
         flash("Route removed.", "ok")
     return redirect(url_for("pages.routing"))

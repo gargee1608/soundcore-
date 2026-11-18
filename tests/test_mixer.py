@@ -5,6 +5,7 @@ import struct
 from soundcore.audio.mixer import OutputMixer, mix_s16le
 from soundcore.audio.service import same_device
 from soundcore.db import session_scope
+from soundcore.models import Route
 from soundcore.ops import OpsError, save_channel, save_route
 from soundcore.config import Settings
 import pytest
@@ -80,4 +81,16 @@ def test_feedback_route_is_refused(data_dir):
             save_route(db, src.id, dst.id, enabled=True, gain_db=0)
         route = save_route(db, src.id, other.id, enabled=True, gain_db=-6)
         assert route.gain_db == -6
+        third = save_channel(
+            db, settings, channel_id=None, name="Line", alsa_device="alsa:local:Headphones:pcm0",
+            device_id="alsa:local:Headphones:pcm0", usb_id="", audio_backend="alsa",
+            sample_rate=16000, gain_db=0, enabled=True, direction="in", device_kind="local",
+        )
+        save_route(db, src.id, other.id, enabled=False, gain_db=-6)
+        save_route(db, third.id, other.id, enabled=True, gain_db=0)
+        save_route(db, third.id, dst.id, enabled=True, gain_db=0)
+        pairs = {(row.input_channel_id, row.output_channel_id) for row in db.query(Route).all()}
+        assert (src.id, other.id) in pairs
+        assert (third.id, other.id) in pairs
+        assert (third.id, dst.id) in pairs
     assert same_device(src, dst) is True

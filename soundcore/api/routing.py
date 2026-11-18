@@ -19,6 +19,7 @@ def list_routes():
                     "input_channel_id": row.input_channel_id,
                     "output_channel_id": row.output_channel_id,
                     "enabled": row.enabled,
+                    "gain_db": row.gain_db,
                 }
                 for row in rows
             ]
@@ -36,10 +37,11 @@ def upsert_route():
             int(payload["input_channel_id"]),
             int(payload["output_channel_id"]),
             enabled=bool(payload.get("enabled", True)),
+            gain_db=float(payload.get("gain_db") or 0),
         )
     except (OpsError, KeyError, TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
-    return jsonify({"id": route.id, "enabled": route.enabled})
+    return jsonify({"id": route.id, "enabled": route.enabled, "gain_db": route.gain_db})
 
 
 @bp.post("/api/routes/<int:route_id>/delete")

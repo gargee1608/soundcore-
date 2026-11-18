@@ -5,7 +5,7 @@
 <section class="page-head">
   <div>
     <h1>Input to output</h1>
-    <p class="lede">A route copies the same samples that are being written to disk. Recording does not pause while a speaker or headset is fed.</p>
+    <p class="lede">One input can feed several outputs. Several inputs can feed one output; that output mixes them. Gain and enable apply on the next buffer without reopening a healthy device.</p>
   </div>
 </section>
 
@@ -32,6 +32,7 @@
         {% endfor %}
       </select>
     </label>
+    <label>Gain dB <input name="gain_db" type="number" step="0.5" min="-24" max="24" value="0"></label>
     <label class="check"><input type="checkbox" name="enabled" checked> Enabled</label>
     <button class="btn solid" type="submit">Save route</button>
   </form>
@@ -53,8 +54,25 @@
           {% if not route.enabled %}Off
           {% elif dest and (dest.device_id or dest.alsa_device) not in audio.available %}Disconnected
           {% else %}On{% endif %}
+          <span class="meta">{{ '%+.1f'|format(route.gain_db or 0) }} dB</span>
         </td>
         <td>
+          <form method="post" action="{{ url_for('pages.routing_save') }}" class="inline-delete">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="input_channel_id" value="{{ route.input_channel_id }}">
+            <input type="hidden" name="output_channel_id" value="{{ route.output_channel_id }}">
+            <input name="gain_db" type="number" step="0.5" min="-24" max="24" value="{{ route.gain_db or 0 }}">
+            <input type="hidden" name="enabled" value="{{ 'off' if route.enabled else 'on' }}">
+            <button class="btn ghost" type="submit">{{ 'Disable' if route.enabled else 'Enable' }}</button>
+          </form>
+          <form method="post" action="{{ url_for('pages.routing_save') }}" class="inline-delete">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="input_channel_id" value="{{ route.input_channel_id }}">
+            <input type="hidden" name="output_channel_id" value="{{ route.output_channel_id }}">
+            <input type="hidden" name="gain_db" value="{{ route.gain_db or 0 }}">
+            <input type="hidden" name="enabled" value="{{ 'on' if route.enabled else 'off' }}">
+            <button class="btn ghost" type="submit">Save gain</button>
+          </form>
           <form method="post" action="{{ url_for('pages.routing_delete', route_id=route.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="btn ghost danger" type="submit">Remove</button>
