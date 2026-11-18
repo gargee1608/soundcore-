@@ -16,7 +16,11 @@ from soundcore.audio.sanketptt import (
     default_device_name,
     device_id_for,
     load_sanket_status,
+    parse_broker_list,
     parse_sanket_source,
+    probe_connection,
+    redact_broker,
+    resolve_brokers,
     web_url,
 )
 from soundcore.audio.service import load_audio_status
@@ -149,6 +153,8 @@ def channels():
         sanket_auto_add=_flag(g.db, "sanket_auto_add"),
         sanket_always_on=_flag(g.db, "sanket_always_on", default=True),
         sanket_device_name=_text_setting(g.db, "sanket_device_name") or default_device_name(),
+        sanket_brokers=_text_setting(g.db, "sanket_brokers"),
+        sanket_broker_preview=[redact_broker(url) for url in resolve_brokers(settings, g.db)],
         active_inputs=active,
         stream_cap=runtime.stream_cap,
         web_url=web_url,
@@ -231,6 +237,41 @@ def channels_sanket_always_on():
     return redirect(url_for("pages.channels"))
 
 
+@bp.post("/channels/sanket/brokers")
+@login_required
+def channels_sanket_brokers():
+    raw = request.form.get("brokers") or ""
+    stripped = False
+    try:
+        urls = parse_broker_list(raw) if raw.strip() else []
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("pages.channels"))
+    if raw.strip() and any("@" in part for part in raw.replace(",", "\n").splitlines()):
+        stripped = True
+    set_setting(g.db, "sanket_brokers", "\n".join(urls))
+    if not urls:
+        flash("Broker list cleared. SoundCore uses the env file, or the public SanketPTT hosts.", "ok")
+    elif stripped:
+        flash("Broker hostnames saved. Usernames were removed; put those in the env file.", "ok")
+    else:
+        flash("Broker list saved. The worker picks it up without a restart.", "ok")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.post("/channels/sanket/test")
+@login_required
+def channels_sanket_test():
+    settings = current_app.config["SETTINGS"]
+    brokers = resolve_brokers(settings, g.db)
+    result = probe_connection(brokers, timeout=5.0)
+    if result["ok"]:
+        flash(f"Connected to {result['broker']}.", "ok")
+    else:
+        flash(f"Connection failed: {result['error']}", "error")
+    return redirect(url_for("pages.channels"))
+
+
 @bp.post("/channels/rescan")
 @login_required
 def channels_rescan():
@@ -246,21 +287,30 @@ def channels_rescan():
 def channels_save():
     settings = current_app.config["SETTINGS"]
     channel_id = request.form.get("channel_id")
+    device = request.form.get("alsa_device") or request.form.get("device_id") or ""
+    backend = request.form.get("audio_backend") or ""
+    if backend == "sanketptt" or device.startswith("sanketptt:"):
+        try:
+            device = device_id_for(parse_sanket_source(device).channel)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("pages.channels"))
+        backend = "sanketptt"
     try:
         save_channel(
             g.db,
             settings,
             channel_id=int(channel_id) if channel_id else None,
             name=request.form.get("name", ""),
-            alsa_device=request.form.get("alsa_device", ""),
+            alsa_device=device,
             sample_rate=int(request.form.get("sample_rate") or settings.default_sample_rate),
             gain_db=float(request.form.get("gain_db") or 0),
             enabled=request.form.get("enabled") == "on",
             direction=request.form.get("direction") or "in",
             device_kind=request.form.get("device_kind") or "usb",
             usb_id=request.form.get("usb_id") or None,
-            audio_backend=request.form.get("audio_backend") or "",
-            device_id=request.form.get("alsa_device") or request.form.get("device_id") or "",
+            audio_backend=backend,
+            device_id=device,
             actor=g.current_user.email,
         )
         flash("Channel saved.", "ok")

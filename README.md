@@ -193,7 +193,7 @@ These are the places the plan left a choice, or where a Pi-only detail could not
 - Live audio between the worker and the web process is localhost UDP. A single-process dev run keeps it in memory instead.
 - Flask-SocketIO uses threading mode so the app runs without eventlet. That is the right shape for one appliance process; it is not a multi-worker deployment.
 - The `recordings.s3_object_id` column is a logical link. The foreign key lives on `s3_objects.recording_id` so the two rows can be inserted without a circular constraint.
-- Software PTT is a simulated virtual input for now. A real PTT app that shows up as an ALSA device can be added like any other card. UDP packet ingest is not in this version.
+- SanketPTT inputs share one receive-only MQTT connection. The topic prefix, 12 kHz PCM framing, and public broker hosts match [vibhvesh/sanketptt](https://github.com/vibhvesh/sanketptt). Broker logins are env settings, not source. `sim:ptt` is still a simulated desk input. There is no generic UDP ingest.
 - Canva Vision, Postgres as the default database, multi-user roles, WebRTC, and local Whisper are out of scope, on purpose.
 
 ## Open questions
@@ -201,7 +201,7 @@ These are the places the plan left a choice, or where a Pi-only detail could not
 - How many channels should a Pi 5 be sized for? Run `scripts/measure_capacity.py` on the device and set the cap from that.
 - Who issues the per-customer `X-Boondock-Key`, and should `language` be pinned to `en`?
 - Which S3 bucket, region, and prefix should the fleet use?
-- Should software PTT arrive as an ALSA device or as UDP later?
+- SanketPTT is the MQTT client above. A second network protocol is not implemented.
 - Is the midnight zone the Pi’s local zone, or a fixed zone for the whole fleet?
 - Where should admin warnings go besides the desk, email, and a webhook?
 - What is Canva Vision? It is not in this version.

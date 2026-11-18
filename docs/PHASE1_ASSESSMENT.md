@@ -1,6 +1,8 @@
 # Phase 1 assessment
 
-Inspection only. No application code was changed. Base is `gargee1608/soundcore-` at `09d9566` (main). The owner confirmed this repository is also **Gargi**.
+Inspection only. No application code was changed in this document. Base is `gargee1608/soundcore-` at `09d9566` (main). The owner confirmed this repository is also **Gargi**.
+
+Phase 2 later moved Sanket broker logins out of Python and into env and the channels page. The broker findings below describe the tree at inspection time.
 
 **Vivesh** is [vibhvesh/voicestudio](https://github.com/vibhvesh/voicestudio). [gargee1608/voicestudio](https://github.com/gargee1608/voicestudio) is a fork of it, one commit ahead (`aba0389`, adds `apps/anon-clone`). The Sanket PTT repository URL is still unconfirmed. A public candidate is noted below and is not treated as the source of truth.
 

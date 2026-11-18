@@ -81,6 +81,15 @@ def save_channel(
         raise OpsError("Sample rate is not one of the supported rates.")
     if gain_db < -24 or gain_db > 24:
         raise OpsError("Gain must stay between -24 and +24 dB.")
+    if audio_backend == "sanketptt":
+        taken = session.query(Channel).filter(
+            Channel.audio_backend == "sanketptt",
+            Channel.device_id == device_id,
+        )
+        if channel_id:
+            taken = taken.filter(Channel.id != int(channel_id))
+        if taken.first() is not None:
+            raise OpsError("That SanketPTT channel is already on this appliance.")
 
     if channel_id:
         channel = session.get(Channel, channel_id)

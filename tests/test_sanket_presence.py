@@ -2,7 +2,7 @@
 
 import json
 
-from soundcore.audio.sanketptt import BROKERS, HEARTBEAT_S, PREFIX, SanketHub
+from soundcore.audio.sanketptt import HEARTBEAT_S, PREFIX, PUBLIC_BROKERS, SanketHub
 
 
 class RecordingClient:
@@ -96,7 +96,7 @@ def test_enabled_channel_auto_joins_with_presence_and_will():
     assert bodies[0]["ts"] == int(now[0] * 1000)
     assert all("/floor" not in item["topic"] and not item["topic"].endswith("/audio") for item in client.published)
     assert hub.status()["power"] == "online"
-    assert hub.broker_url == BROKERS[0]
+    assert hub.broker_url == PUBLIC_BROKERS[0]
 
 
 def test_heartbeat_repeats_presence_on_the_web_interval():

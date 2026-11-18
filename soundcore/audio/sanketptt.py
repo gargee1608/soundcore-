@@ -1,16 +1,20 @@
 """Receive-only SanketPTT input.
 
-The framing matches the web client in index.html and Sanket Edge in pi/sanket/mqtt_relay.py:
+Verified against https://github.com/vibhvesh/sanketptt (web ``index.html`` and
+``pi/sanket/mqtt_relay.py``):
 
 - prefix ``ptt-radio-66ab9178/``
 - topics ``<prefix><channel>/{presence/<id>,floor,audio,sstv}``
 - audio payload ``[n][id bytes][Int16LE PCM at 12 kHz]``
 - floor payload ``{"t":"claim"|"hb"|"release","id","name"}``
-- brokers, in fallback order, are the same four secure WebSocket URLs
+- presence payload ``{"id","name","ts"}`` (extra fields such as ``loc`` are ignored)
+- the web client keeps channel case; Sanket Edge's ``clean_ch`` also lowercases
 
-SoundCore does not publish presence, floor, or audio. Subscribing is enough to receive.
-Several SoundCore inputs share one MQTT connection. Discovery uses the same wildcard
-Sanket Edge uses for presence (``<prefix>+/presence/+``) plus ``<prefix>+/audio``.
+Broker hostnames match that repo. Usernames and passwords are not stored here.
+They come from the environment, and a console list can replace the hostnames.
+
+SoundCore does not publish floor or audio. It publishes presence only when
+powered on. Several inputs share one MQTT connection.
 """
 
 from __future__ import annotations
@@ -29,12 +33,17 @@ logger = logging.getLogger(__name__)
 PREFIX = "ptt-radio-66ab9178/"
 RATE = 12000
 WEB_BASE = "https://vibhvesh.github.io/sanketptt/"
-BROKERS = (
-    "wss://public:public@public.cloud.shiftr.io",
+# Same public hosts as vibhvesh/sanketptt, in the same order, with no userinfo.
+# public.cloud.shiftr.io expects the published demo login. That login is read
+# from the environment and applied only to this host.
+PUBLIC_BROKERS = (
+    "wss://public.cloud.shiftr.io",
     "wss://broker.emqx.io:8084/mqtt",
     "wss://broker.hivemq.com:8884/mqtt",
     "wss://test.mosquitto.org:8081",
 )
+SHIFTR_HOST = "public.cloud.shiftr.io"
+_BROKER_SCHEMES = {"ws", "wss", "mqtt", "mqtts"}
 FLOOR_TIMEOUT_S = 2.5
 PRESENCE_TTL_S = 15.0
 MIN_CLIP_S = 0.4
@@ -102,6 +111,161 @@ def channel_from_device(device_id: str) -> str:
     if raw.startswith("sanketptt:"):
         raw = raw.split(":", 1)[1]
     return clean_channel(raw)
+
+
+def parse_broker_list(text: str) -> list[str]:
+    """Split a comma- or newline-separated broker list. Drop userinfo."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for part in str(text or "").replace(",", "\n").splitlines():
+        url = part.strip()
+        if not url:
+            continue
+        url = strip_broker_userinfo(url)
+        if url in seen:
+            continue
+        parsed = urlparse(url if "://" in url else f"wss://{url}")
+        if parsed.scheme not in _BROKER_SCHEMES or not parsed.hostname:
+            raise ValueError(f"Broker URL is not an MQTT WebSocket address: {url}")
+        normal = url if "://" in url else f"wss://{url}"
+        normal = strip_broker_userinfo(normal)
+        if normal not in seen:
+            seen.add(normal)
+            urls.append(normal)
+        if len(urls) >= 8:
+            break
+    return urls
+
+
+def strip_broker_userinfo(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.hostname:
+        return url
+    if not parsed.username and not parsed.password:
+        return url
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path or ""
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{parsed.scheme}://{parsed.hostname}{port}{path}{query}"
+
+
+def redact_broker(url: str) -> str:
+    return strip_broker_userinfo(url or "")
+
+
+def apply_broker_auth(urls: list[str], username: str, password: str) -> list[str]:
+    """Attach env credentials only to the public Shiftr host, and only when the URL has none."""
+    user = (username or "").strip()
+    secret = password or ""
+    if not user:
+        return list(urls)
+    from urllib.parse import quote
+
+    applied: list[str] = []
+    for url in urls:
+        parsed = urlparse(url)
+        if parsed.username or (parsed.hostname or "") != SHIFTR_HOST:
+            applied.append(url)
+            continue
+        port = f":{parsed.port}" if parsed.port else ""
+        path = parsed.path or ""
+        query = f"?{parsed.query}" if parsed.query else ""
+        auth = quote(user, safe="")
+        if secret:
+            auth = f"{auth}:{quote(secret, safe='')}"
+        applied.append(f"{parsed.scheme}://{auth}@{parsed.hostname}{port}{path}{query}")
+    return applied
+
+
+def resolve_brokers(settings, session=None) -> list[str]:
+    """DB list wins when set, then the env list, then the public hosts."""
+    raw = ""
+    if session is not None:
+        from soundcore.models import Setting
+
+        row = session.get(Setting, "sanket_brokers")
+        if row is not None and (row.value or "").strip():
+            raw = row.value
+    if not raw:
+        raw = getattr(settings, "sanket_brokers", "") or ""
+    urls = parse_broker_list(raw) if str(raw).strip() else list(PUBLIC_BROKERS)
+    if not urls:
+        urls = list(PUBLIC_BROKERS)
+    return apply_broker_auth(
+        urls,
+        getattr(settings, "sanket_broker_username", "") or "",
+        getattr(settings, "sanket_broker_password", "") or "",
+    )
+
+
+def probe_connection(brokers: list[str], *, timeout: float = 5.0, factory=None) -> dict:
+    """Open each broker until one CONNACK arrives. Nothing is published."""
+    attempts = []
+    rows = [url for url in brokers if url]
+    if not rows:
+        return {"ok": False, "broker": "", "error": "No brokers configured", "attempts": []}
+    for url in rows:
+        attempt = _probe_one(url, timeout=timeout, factory=factory)
+        attempt["broker"] = redact_broker(url)
+        attempts.append(attempt)
+        if attempt["ok"]:
+            return {"ok": True, "broker": attempt["broker"], "error": "", "attempts": attempts}
+    return {"ok": False, "broker": "", "error": attempts[-1]["error"], "attempts": attempts}
+
+
+def _probe_one(url: str, *, timeout: float, factory) -> dict:
+    done = threading.Event()
+    outcome = {"ok": False, "error": "no CONNACK"}
+
+    def on_connect(_client, _userdata, _flags, rc, _props=None):
+        code = getattr(rc, "value", rc)
+        if code in (0, None):
+            outcome["ok"] = True
+            outcome["error"] = ""
+        else:
+            outcome["error"] = f"broker refused: {rc}"
+        done.set()
+
+    def on_disconnect(_client, _userdata, _flags=None, rc=None, _props=None):
+        if not done.is_set():
+            outcome["error"] = f"disconnected ({rc})"
+            done.set()
+
+    maker = factory or _paho_factory
+    try:
+        client = maker(url)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    try:
+        host, port, path, use_tls, username, password = _split_broker(url)
+        if hasattr(client, "ws_set_options"):
+            client.ws_set_options(path=path or "/")
+        if use_tls and hasattr(client, "tls_set"):
+            client.tls_set()
+        if username and hasattr(client, "username_pw_set"):
+            client.username_pw_set(username, password or "")
+        if hasattr(client, "connect_async"):
+            client.connect_async(host, port, keepalive=10)
+        if hasattr(client, "loop_start"):
+            client.loop_start()
+        done.wait(timeout)
+    except Exception as exc:
+        outcome["error"] = str(exc)
+    finally:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+        if hasattr(client, "loop_stop"):
+            try:
+                client.loop_stop()
+            except Exception:
+                pass
+    if not done.is_set() and not outcome["ok"]:
+        outcome["error"] = "timed out waiting for CONNACK"
+    return {"ok": bool(outcome["ok"]), "error": outcome["error"]}
 
 
 @dataclass(frozen=True)
@@ -268,6 +432,7 @@ class SanketHub:
         self._connect_started = 0.0
         self.connect_calls = 0
         self.published: list[dict] = []
+        self._brokers: tuple[str, ...] = ()
 
     def ensure(self) -> None:
         """Keep one reconnect loop running. Tests call connect() directly instead."""
@@ -290,8 +455,28 @@ class SanketHub:
         return (self._clock() - self._connect_started) < HANDSHAKE_S
 
     @property
+    def brokers(self) -> tuple[str, ...]:
+        return self._brokers or PUBLIC_BROKERS
+
+    @property
     def broker_url(self) -> str:
-        return BROKERS[self.broker_index % len(BROKERS)]
+        rows = self.brokers
+        return rows[self.broker_index % len(rows)]
+
+    def set_brokers(self, urls: list[str] | tuple[str, ...]) -> None:
+        cleaned = tuple(dict.fromkeys(url for url in urls if url)) or PUBLIC_BROKERS
+        current = self.broker_url if self._brokers else ""
+        with self._lock:
+            self._brokers = cleaned
+        if not self.connected or not current:
+            return
+        if current in cleaned:
+            self.broker_index = cleaned.index(current)
+            return
+        self.broker_index = 0
+        self.connected = False
+        self.last_error = "broker list changed"
+        self._drop_client()
 
     def set_channels(self, names: set[str] | list[str]) -> None:
         cleaned = {clean_channel(name) for name in names if clean_channel(name)}
@@ -349,21 +534,21 @@ class SanketHub:
         if self._connecting:
             logger.warning(
                 "sanket: handshake to %s exceeded %.0fs with no CONNACK; rotating broker",
-                self.broker_url,
+                redact_broker(self.broker_url),
                 HANDSHAKE_S,
             )
             self._rotate_broker(failed_before_connect=True)
         self._drop_client()
         self.connect_calls += 1
         url = self.broker_url
-        logger.info("sanket: connecting to broker %s", url)
+        logger.info("sanket: connecting to broker %s", redact_broker(url))
         factory = self._factory or _paho_factory
         try:
             client = factory(url)
         except Exception as exc:
             self._connecting = False
             self.last_error = str(exc)
-            logger.warning("sanket: broker %s failed to build a client: %s", url, exc, exc_info=True)
+            logger.warning("sanket: broker %s failed to build a client: %s", redact_broker(url), exc, exc_info=True)
             self._rotate_broker(failed_before_connect=True)
             return
         client.on_connect = self._on_connect
@@ -392,7 +577,7 @@ class SanketHub:
             self._connecting = False
             self.last_error = str(exc)
             self.connected = False
-            logger.warning("sanket: connect to %s failed: %s", url, exc, exc_info=True)
+            logger.warning("sanket: connect to %s failed: %s", redact_broker(url), exc, exc_info=True)
             self._rotate_broker(failed_before_connect=True)
 
     def close(self) -> None:
@@ -420,10 +605,12 @@ class SanketHub:
             subscribed = sorted(self._channels)
         return {
             "connected": self.connected,
-            "broker": self.broker_url if self.connected or self.last_error else "",
-            "broker_url": self.broker_url,
+            "broker": redact_broker(self.broker_url) if (self.connected or self.last_error) else "",
+            "broker_url": redact_broker(self.broker_url),
+            "brokers": [redact_broker(url) for url in self.brokers],
             "last_error": self.last_error,
             "reconnects": self.reconnects,
+            "backoff_s": self.backoff_s,
             "discover": self._discover,
             "subscribed": subscribed,
             "channels": rows,
@@ -467,7 +654,7 @@ class SanketHub:
         if self.presence_enabled and self.connected and now - self._last_beat >= HEARTBEAT_S:
             self.beat()
         if self.connected and self._last_activity and now - self._last_activity > STALE_S:
-            logger.info("sanket: no MQTT activity for %.0fs on %s; forcing reconnect", now - self._last_activity, self.broker_url)
+            logger.info("sanket: no MQTT activity for %.0fs on %s; forcing reconnect", now - self._last_activity, redact_broker(self.broker_url))
             self.last_error = "stale connection"
             self.connected = False
             self._drop_client()
@@ -521,18 +708,24 @@ class SanketHub:
                 self._connecting = False
                 self.last_error = f"broker refused: {rc}"
                 self.connected = False
-                logger.warning("sanket: on_connect refused reason=%s flags=%s broker=%s", rc, flags, self.broker_url)
+                logger.warning("sanket: on_connect refused reason=%s flags=%s broker=%s", rc, flags, redact_broker(self.broker_url))
                 self._rotate_broker(failed_before_connect=True)
                 return
             self._connecting = False
             self.connected = True
+            relink = self._was_connected
             self._was_connected = True
             self.last_error = ""
             self.backoff_s = 0.3
             self._subs = set()
             self._sync_subs()
             self._last_activity = self._clock()
-            logger.info("sanket: on_connect reason=%s broker=%s", rc, self.broker_url)
+            channels = ", ".join(sorted(self._channels)) or "no channels"
+            self._log_link(
+                "stream_reconnected" if relink else "stream_connected",
+                f"SanketPTT {'reconnected' if relink else 'connected'} via {redact_broker(self.broker_url)} ({channels})",
+            )
+            logger.info("sanket: on_connect reason=%s broker=%s", rc, redact_broker(self.broker_url))
         except Exception:
             self._connecting = False
             self.connected = False
@@ -540,7 +733,7 @@ class SanketHub:
             return
         logger.info(
             "sanket: connected broker=%s subscriptions=%s",
-            self.broker_url,
+            redact_broker(self.broker_url),
             ", ".join(self.subscriptions()) or "(none)",
         )
         if self.presence_enabled:
@@ -559,10 +752,16 @@ class SanketHub:
                 return
             if self.connected:
                 self.last_error = f"disconnected ({rc})"
+                channels = ", ".join(sorted(self._channels)) or "no channels"
+                self._log_link(
+                    "stream_disconnected",
+                    f"SanketPTT disconnected from {redact_broker(self.broker_url)} ({channels}): {rc}",
+                    level="warning",
+                )
             self._connecting = False
             self.connected = False
             self.reconnects += 1
-            logger.warning("sanket: on_disconnect reason=%s flags=%s broker=%s", rc, flags, self.broker_url)
+            logger.warning("sanket: on_disconnect reason=%s flags=%s broker=%s", rc, flags, redact_broker(self.broker_url))
             if not self._closed:
                 self._rotate_broker(failed_before_connect=False)
             self.write_status()
@@ -580,12 +779,12 @@ class SanketHub:
     def _rotate_broker(self, *, failed_before_connect: bool) -> None:
         if failed_before_connect:
             previous = self.broker_url
-            self.broker_index = (self.broker_index + 1) % len(BROKERS)
+            self.broker_index = (self.broker_index + 1) % len(self.brokers)
             self.backoff_s = min(30.0, max(0.3, self.backoff_s * 2))
-            logger.info("sanket: leaving broker %s; next %s in %.1fs", previous, self.broker_url, self.backoff_s)
+            logger.info("sanket: leaving broker %s; next %s in %.1fs", redact_broker(previous), redact_broker(self.broker_url), self.backoff_s)
         else:
             self.backoff_s = min(30.0, max(1.5, self.backoff_s))
-            logger.info("sanket: reconnecting to broker %s in %.1fs", self.broker_url, self.backoff_s)
+            logger.info("sanket: reconnecting to broker %s in %.1fs", redact_broker(self.broker_url), self.backoff_s)
         self.reconnects += 0
 
     def _sync_subs(self) -> None:
@@ -613,6 +812,8 @@ class SanketHub:
             state.last_packet = now
             if sub.startswith("presence/"):
                 uid = sub[len("presence/") :]
+                if uid and uid == self.client_id:
+                    return
                 if not payload:
                     state.users.pop(uid, None)
                 else:
@@ -717,6 +918,14 @@ class SanketHub:
                 if state.floor and now - float(state.floor.get("seen") or 0) > FLOOR_TIMEOUT_S:
                     self._finish_clip(state)
                     state.floor = None
+
+    def _log_link(self, kind: str, message: str, *, level: str = "info") -> None:
+        try:
+            from soundcore.activity import record_activity
+
+            record_activity(kind, message, channel="sanket", level=level)
+        except Exception:
+            logger.exception("sanket link event was not stored")
 
     def _drop_client(self) -> None:
         client = self._client

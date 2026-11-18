@@ -3,20 +3,24 @@
 import json
 import struct
 
+import pytest
+
 from soundcore.audio.capture import PipeWirePlayback
 from soundcore.audio.recorder import fanout
 from soundcore.audio.sanketptt import (
     AUDIO_WILDCARD,
-    BROKERS,
     PREFIX,
     PRESENCE_WILDCARD,
+    PUBLIC_BROKERS,
     RATE,
     SanketCapture,
     SanketHub,
+    apply_broker_auth,
     clean_channel,
     decode_audio_payload,
     device_id_for,
     parse_sanket_source,
+    redact_broker,
     resample_s16le,
     web_url,
 )
@@ -129,10 +133,107 @@ def test_one_connection_serves_many_channels_and_discovery():
 
 def test_broker_fallback_rotates_with_backoff():
     hub = SanketHub(mqtt_factory=_factory([]))
-    assert hub.broker_url == BROKERS[0]
+    assert hub.broker_url == PUBLIC_BROKERS[0]
     hub.fail_connect()
-    assert hub.broker_url == BROKERS[1]
+    assert hub.broker_url == PUBLIC_BROKERS[1]
     assert hub.backoff_s >= 0.6
+
+
+def test_eight_sanket_channels_share_one_connection():
+    made = []
+    hub = SanketHub(mqtt_factory=_factory(made), clock=lambda: 1_700_000_000.0)
+    names = [f"ch{i}" for i in range(8)]
+    hub.set_channels(names)
+    hub.connect()
+    assert len(made) == 1
+    topics = _topics(made[0])
+    for name in names:
+        assert f"{PREFIX}{name}/audio" in topics
+        assert f"{PREFIX}{name}/floor" in topics
+
+
+def test_shiftr_login_is_not_in_source_and_status_is_redacted():
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "soundcore" / "audio" / "sanketptt.py").read_text(encoding="utf-8")
+    assert "public:public@" not in text
+    urls = apply_broker_auth(list(PUBLIC_BROKERS), "public", "public")
+    assert urls[0].startswith("wss://public:public@public.cloud.shiftr.io")
+    assert "public:" not in urls[1]
+    hub = SanketHub(clock=lambda: 1_700_000_000.0)
+    hub.set_brokers(urls)
+    dumped = json.dumps(hub.status())
+    assert "public:public" not in dumped
+    assert redact_broker(urls[0]) == "wss://public.cloud.shiftr.io"
+
+
+def test_default_cap_holds_eight_sanket_inputs(data_dir):
+    from soundcore.config import Settings
+    from soundcore.db import session_scope
+    from soundcore.ops import OpsError, save_channel
+
+    settings = Settings(secret_key="x", database_url="sqlite://", data_dir=data_dir, stream_cap=8)
+    with session_scope() as db:
+        for index in range(8):
+            save_channel(
+                db,
+                settings,
+                channel_id=None,
+                name=f"S{index}",
+                alsa_device=f"sanketptt:ch{index}",
+                device_id=f"sanketptt:ch{index}",
+                audio_backend="sanketptt",
+                sample_rate=16000,
+                gain_db=0,
+                enabled=True,
+                direction="in",
+                device_kind="radio",
+            )
+        with pytest.raises(OpsError, match="Stream cap"):
+            save_channel(
+                db,
+                settings,
+                channel_id=None,
+                name="S9",
+                alsa_device="sanketptt:ch9",
+                device_id="sanketptt:ch9",
+                audio_backend="sanketptt",
+                sample_rate=16000,
+                gain_db=0,
+                enabled=True,
+                direction="in",
+                device_kind="radio",
+            )
+
+
+def test_saved_broker_list_drops_passwords_and_overrides_env(data_dir):
+    from soundcore.config import Settings
+    from soundcore.db import session_scope
+    from soundcore.audio.sanketptt import parse_broker_list, resolve_brokers
+    from soundcore.models import Setting
+
+    settings = Settings(
+        secret_key="x",
+        database_url="sqlite://",
+        data_dir=data_dir,
+        sanket_brokers="wss://broker.hivemq.com:8884/mqtt",
+        sanket_broker_username="public",
+        sanket_broker_password="public",
+    )
+    with session_scope() as db:
+        db.add(
+            Setting(
+                key="sanket_brokers",
+                value="wss://public:secret@public.cloud.shiftr.io\nwss://broker.emqx.io:8084/mqtt",
+            )
+        )
+        db.flush()
+        urls = resolve_brokers(settings, db)
+    assert urls[0].startswith("wss://public:public@public.cloud.shiftr.io")
+    assert "secret" not in urls[0]
+    assert urls[1] == "wss://broker.emqx.io:8084/mqtt"
+    with pytest.raises(ValueError):
+        parse_broker_list("https://example.com/file")
 
 
 def test_sanket_audio_is_routed_to_pipewire_playback():

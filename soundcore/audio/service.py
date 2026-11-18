@@ -262,6 +262,7 @@ class AudioService:
             device_id_for,
             get_hub,
             load_client_id,
+            resolve_brokers,
         )
         from soundcore.models import Channel, Setting
         from soundcore.ops import save_channel
@@ -274,6 +275,7 @@ class AudioService:
 
         hub = get_hub()
         hub.data_dir = Path(self.settings.data_dir)
+        hub.set_brokers(resolve_brokers(self.settings, session))
         names = []
         for row in enabled_inputs:
             _device, backend_name = channel_endpoint(row)

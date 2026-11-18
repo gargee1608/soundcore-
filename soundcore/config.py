@@ -99,6 +99,9 @@ class Settings:
     session_user: str = "sensepart"
     pulse_server: str = "unix:/run/soundcore/pulse.sock"
     audio_bridge: bool = False
+    sanket_brokers: str = ""
+    sanket_broker_username: str = ""
+    sanket_broker_password: str = ""
     allowed_sample_rates: tuple[int, ...] = field(
         default_factory=lambda: (8000, 16000, 22050, 44100, 48000)
     )
@@ -244,4 +247,7 @@ def load_settings(*, dotenv: bool = False, environ: dict | None = None) -> Setti
         session_user=str(raw("session_user", "SOUNDCORE_SESSION_USER", "sensepart") or "sensepart"),
         pulse_server=str(raw("pulse_server", "PULSE_SERVER", "unix:/run/soundcore/pulse.sock") or "unix:/run/soundcore/pulse.sock"),
         audio_bridge=_bool(str(raw("audio_bridge", "SOUNDCORE_AUDIO_BRIDGE", "")) or None, False),
+        sanket_brokers=str(raw("sanket_brokers", "SOUNDCORE_SANKET_BROKERS", "") or ""),
+        sanket_broker_username=str(raw("sanket_broker_username", "SOUNDCORE_SANKET_BROKER_USERNAME", "") or ""),
+        sanket_broker_password=str(raw("sanket_broker_password", "SOUNDCORE_SANKET_BROKER_PASSWORD", "") or ""),
     )

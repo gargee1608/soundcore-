@@ -82,6 +82,29 @@
     <button class="btn ghost" type="submit">Save power</button>
   </form>
   <p class="meta">Default is on. Enabled channels join the relay when the worker starts and stay online as this name. Floor and audio are never transmitted.</p>
+  <form method="post" action="{{ url_for('pages.channels_sanket_brokers') }}" class="route-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="wide">Broker URLs
+      <textarea name="brokers" rows="4" placeholder="{{ sanket_broker_preview | join('\n') }}">{{ sanket_brokers }}</textarea>
+    </label>
+    <button class="btn ghost" type="submit">Save brokers</button>
+  </form>
+  <p class="meta">One URL per line. A saved list overrides <code>SOUNDCORE_SANKET_BROKERS</code>. Leave it blank to use that env value, or the public SanketPTT hosts. Do not put a username or password here. The Shiftr demo login belongs in <code>SOUNDCORE_SANKET_BROKER_USERNAME</code> and <code>SOUNDCORE_SANKET_BROKER_PASSWORD</code>.</p>
+  <p class="meta">In use: {% for url in sanket_broker_preview %}<code>{{ url }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <form method="post" action="{{ url_for('pages.channels_sanket_test') }}" class="inline-delete">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn solid" type="submit">Test connection</button>
+  </form>
+  <div id="sanket-live" data-url="{{ url_for('streams_api.sanket_status') }}">
+    <p class="meta" id="sanket-live-line">
+      {% if sanket.connected %}Connected to {{ sanket.broker or sanket.broker_url or 'broker' }}
+      {% elif sanket.power == 'reconnecting' %}Reconnecting{% if sanket.last_error %} — {{ sanket.last_error }}{% endif %}
+      {% else %}Not connected{% if sanket.last_error %} — {{ sanket.last_error }}{% endif %}
+      {% endif %}
+      · reconnects {{ sanket.reconnects or 0 }}
+    </p>
+    <p class="meta" id="sanket-live-subs">Subscribed: {{ (sanket.subscribed or []) | join(', ') or 'none' }}</p>
+  </div>
   {% if sanket.channels %}
   <table class="grid">
     <thead><tr><th>Heard on the relay</th><th>Online</th><th>Talking</th><th></th></tr></thead>
@@ -172,6 +195,7 @@
           {% if sanket.power == 'online' %} · Powered on · online as {{ sanket.presence_name }}{% elif sanket.power == 'reconnecting' %} · Reconnecting{% elif channel.enabled %} · powered off{% endif %}
           {% if live %} · broker {{ sanket.broker or '—' }} · last packet {{ live.last_packet or '—' }} · talker {{ live.talking or live.last_talker or '—' }}{% endif %}
           {% if sanket.last_error %} · {{ sanket.last_error }}{% endif %}
+          · <span data-sanket-status="{{ channel.id }}">{{ 'enabled' if channel.enabled else 'disabled' }}</span>
           · <a href="{{ web_url(device_key.split(':')[-1]) }}">Open in SanketPTT</a>
         {% endif %}
       </span>
@@ -191,4 +215,36 @@
   </form>
   {% endfor %}
 </section>
+<script>
+(function () {
+  var box = document.getElementById("sanket-live");
+  if (!box) return;
+  var line = document.getElementById("sanket-live-line");
+  var subs = document.getElementById("sanket-live-subs");
+  function paint(data) {
+    if (!data || !line) return;
+    var state = data.connected ? "Connected to " + (data.broker || "broker") : (data.power === "reconnecting" ? "Reconnecting" : "Not connected");
+    if (!data.connected && data.last_error) state += " — " + data.last_error;
+    line.textContent = state + " · reconnects " + (data.reconnects || 0) + (data.backoff_s ? " · backoff " + data.backoff_s + "s" : "");
+    if (subs) subs.textContent = "Subscribed: " + ((data.subscribed || []).join(", ") || "none");
+    (data.streams || []).forEach(function (row) {
+      var slot = document.querySelector('[data-sanket-status="' + row.id + '"]');
+      if (!slot) return;
+      var bits = [row.enabled ? "enabled" : "disabled"];
+      if (row.talking) bits.push("talking " + row.talking);
+      else if (row.last_talker) bits.push("last " + row.last_talker);
+      if (row.online) bits.push(row.online + " online");
+      slot.textContent = bits.join(" · ");
+    });
+  }
+  function tick() {
+    fetch(box.dataset.url, { headers: { "Accept": "application/json" } })
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(paint)
+      .catch(function () {});
+  }
+  tick();
+  setInterval(tick, 2000);
+})();
+</script>
 {% endblock %}
