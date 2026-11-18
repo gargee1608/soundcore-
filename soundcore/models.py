@@ -92,6 +92,7 @@ class Channel(Base):
     format: Mapped[str] = mapped_column(String(16), nullable=False, default="s16le")
     gain_db: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+    recording: Mapped[bool] = mapped_column(nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, onupdate=utcnow)
 

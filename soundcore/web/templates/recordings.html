@@ -19,6 +19,23 @@
   </form>
 </section>
 
+{% if active %}
+<section class="panel">
+  <h2>Active sessions</h2>
+  <ul class="file-list">
+    {% for rec in active %}
+    <li>
+      <div>
+        <strong>{{ names.get(rec.channel_id, 'Channel') }}</strong>
+        <span>{{ rec.filename }}</span>
+      </div>
+      <em>open since {{ rec.started_at|hm }}</em>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
 {% if not recordings %}
 <section class="empty">
   <h2>No files yet</h2>

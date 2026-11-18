@@ -89,6 +89,9 @@ def migrate_schema(engine=None) -> None:
             route_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(routes)")}
             if "gain_db" not in route_columns:
                 conn.exec_driver_sql("ALTER TABLE routes ADD COLUMN gain_db FLOAT DEFAULT 0")
+        if "recording" not in columns:
+            conn.exec_driver_sql("ALTER TABLE channels ADD COLUMN recording BOOLEAN DEFAULT 0")
+            conn.exec_driver_sql("UPDATE channels SET recording = 1 WHERE direction = 'in'")
 
 
 def session_factory() -> sessionmaker:

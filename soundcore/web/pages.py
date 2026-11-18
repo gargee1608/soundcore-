@@ -316,6 +316,7 @@ def channels_save():
             sample_rate=int(request.form.get("sample_rate") or settings.default_sample_rate),
             gain_db=float(request.form.get("gain_db") or 0),
             enabled=request.form.get("enabled") == "on",
+            recording=request.form.get("recording") == "on",
             direction=request.form.get("direction") or "in",
             device_kind=request.form.get("device_kind") or "usb",
             usb_id=usb_id or None,
@@ -433,6 +434,7 @@ def recordings():
     if channel_id:
         query = query.filter(Recording.channel_id == channel_id)
     rows = query.limit(100).all()
+    active = [row for row in rows if row.storage_state == "writing"]
     channels = g.db.query(Channel).filter_by(direction="in").order_by(Channel.name).all()
     names = {row.id: row.name for row in channels}
     ids = [row.id for row in rows] or [0]
@@ -442,6 +444,7 @@ def recordings():
     return render_template(
         "recordings.html",
         recordings=rows,
+        active=active,
         channels=channels,
         names=names,
         transcripts=transcripts,
@@ -519,15 +522,17 @@ def settings_save():
         cap = int(request.form["stream_cap"])
         chunk = int(request.form["chunk_seconds"])
         idle = int(request.form["idle_days"])
+        retention = int(request.form.get("retention_days") or 0)
     except (KeyError, ValueError):
         flash("Check the numbers and try again.", "error")
         return redirect(url_for("pages.settings_page"))
-    if not (1 <= cap <= 64 and 5 <= chunk <= 3600 and 1 <= idle <= 3650):
+    if not (1 <= cap <= 64 and 5 <= chunk <= 3600 and 1 <= idle <= 3650 and 0 <= retention <= 3650):
         flash("Cap must be 1–64, chunks 5–3600 seconds, idle days 1–3650.", "error")
         return redirect(url_for("pages.settings_page"))
     set_setting(g.db, "stream_cap", str(cap))
     set_setting(g.db, "chunk_seconds", str(chunk))
     set_setting(g.db, "idle_days", str(idle))
+    set_setting(g.db, "retention_days", str(retention))
     set_setting(g.db, "transcribe_enabled", "1" if request.form.get("transcribe_enabled") == "on" else "0")
     set_setting(g.db, "boondock_language", (request.form.get("boondock_language") or "")[:16])
     set_setting(g.db, "notify_email", (request.form.get("notify_email") or "")[:200])

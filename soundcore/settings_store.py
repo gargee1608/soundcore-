@@ -69,6 +69,7 @@ class Runtime:
     playback_grace_seconds: int
     transcribe_max_attempts: int
     transcribe_max_bytes: int
+    retention_days: int = 0
 
 
 def _raw(session, key: str, fallback: str) -> str:
@@ -101,4 +102,5 @@ def load_runtime(session, settings: Settings) -> Runtime:
         playback_grace_seconds=settings.playback_grace_seconds,
         transcribe_max_attempts=settings.transcribe_max_attempts,
         transcribe_max_bytes=settings.transcribe_max_bytes,
+        retention_days=int(_raw(session, "retention_days", "0") or 0),
     )

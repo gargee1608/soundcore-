@@ -171,6 +171,8 @@ class AudioService:
         self._flow: dict[int, dict] = {}
         self._flow_lock = threading.Lock()
         self._usb_present: set[str] | None = None
+        self._record_on: dict[int, bool] = {}
+        self._record_lock = threading.Lock()
         from soundcore.audio.mixer import MixerBank
 
         self.mixers = MixerBank(self._open_output, self._hw_for)
@@ -249,6 +251,11 @@ class AudioService:
             inputs_all = {row.id: row for row in session.query(Channel).filter_by(direction="in").all()}
             routes, notices = plan_routes(route_rows, outputs, available, inputs_all)
             self.mixers.apply(routes)
+            self._apply_retention(session)
+            with self._record_lock:
+                self._record_on = {
+                    row.id: bool(row.recording) for row in session.query(Channel).all()
+                }
             desired_specs = desired
             self._sync_sanket(session, rows)
         with self._route_lock:
@@ -436,6 +443,32 @@ class AudioService:
                     logger.exception("could not auto-add SanketPTT channel %s", name)
         hub.write_status()
 
+    def _apply_retention(self, session) -> None:
+        now = time.monotonic()
+        if now - getattr(self, "_retention_at", 0.0) < 60:
+            return
+        self._retention_at = now
+        from soundcore.models import Setting
+        from soundcore.storage.retention import cleanup_local_retention
+
+        row = session.get(Setting, "retention_days")
+        days = int(row.value) if row is not None and str(row.value).strip() else 0
+        removed = cleanup_local_retention(session, self.settings.data_dir, retention_days=days)
+        if removed:
+            from soundcore.activity import record_activity
+
+            record_activity(
+                "retention",
+                f"Removed {removed} local recording(s) older than {days} days",
+                session=session,
+            )
+
+    def _recording_enabled(self, channel_id: int) -> bool:
+        with self._record_lock:
+            if channel_id not in self._record_on:
+                return True
+            return bool(self._record_on[channel_id])
+
     def _routes_for(self, channel_id: int) -> list[RouteTarget]:
         with self._route_lock:
             return list(self._routes.get(channel_id, []))
@@ -484,7 +517,12 @@ class AudioService:
                     self._note_flow(spec.id, status="idle", level=0.0)
                     stop.wait(0.05)
                     continue
-                rotate = writer is None or (now_mono - chunk_started) >= runtime.chunk_seconds
+                recording_on = self._recording_enabled(spec.id)
+                if not recording_on and writer is not None:
+                    self._finalize(recording_id, writer)
+                    writer = None
+                    recording_id = None
+                rotate = recording_on and (writer is None or (now_mono - chunk_started) >= runtime.chunk_seconds)
                 if rotate:
                     blocked = self._disk_blocks_new_file()
                     if blocked and writer is not None:
@@ -803,8 +841,15 @@ class AudioService:
                 session.add(recording)
                 session.flush()
                 recording_id = recording.id
-            writer = WavRecorder(path, spec.sample_rate)
+                writer = WavRecorder(path, spec.sample_rate)
             writer.open()
+            from soundcore.activity import record_activity
+
+            record_activity(
+                "recording_started",
+                f"Recording {path.name}",
+                channel=spec.slug,
+            )
             return writer, recording_id
         except Exception:
             logger.exception("could not open recording for %s", spec.slug)
@@ -842,6 +887,12 @@ class AudioService:
                 channel = session.get(Channel, recording.channel_id)
                 from soundcore.activity import record_activity
 
+                record_activity(
+                    "recording_stopped",
+                    f"Stopped {recording.filename} ({stats['duration_s']:.1f}s)",
+                    channel=channel.slug if channel is not None else "",
+                    session=session,
+                )
                 record_activity(
                     "file_closed",
                     f"Closed {recording.filename} ({stats['duration_s']:.1f}s)",

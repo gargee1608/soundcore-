@@ -54,6 +54,7 @@ class OutputMixer:
         self.opened_hw = ""
         self.level = 0.0
         self.last_error = ""
+        self.on_mix = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.frames = max(1, int(sample_rate * 0.02))
@@ -132,6 +133,12 @@ class OutputMixer:
                     playback.write(pcm)
                 except Exception as exc:
                     self.last_error = str(exc)
+            hook = self.on_mix
+            if hook is not None and pcm:
+                try:
+                    hook(pcm)
+                except Exception:
+                    self.last_error = "output recording failed"
             next_tick += 0.02
             delay = next_tick - time.monotonic()
             if delay > 0:

@@ -210,7 +210,8 @@
     {% else %}
     <input type="hidden" name="usb_id" value="{{ channel.usb_id or '' }}">
     {% endif %}
-    <label class="check"><input type="checkbox" name="enabled" {% if channel.enabled %}checked{% endif %}> {{ 'Record' if channel.direction == 'in' else 'Available' }}</label>
+    <label class="check"><input type="checkbox" name="enabled" {% if channel.enabled %}checked{% endif %}> {{ 'Enabled' if channel.direction == 'in' else 'Available' }}</label>
+    <label class="check"><input type="checkbox" name="recording" {% if channel.recording %}checked{% endif %}> Record</label>
     <button class="btn solid" type="submit">Save</button>
   </form>
   {% if channel.direction == 'out' %}

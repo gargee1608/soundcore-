@@ -55,6 +55,7 @@ def save_channel(
     gain_db: float,
     enabled: bool,
     direction: str,
+    recording: bool | None = None,
     device_kind: str = "usb",
     usb_id: str | None = None,
     actor: str = "",
@@ -134,6 +135,11 @@ def save_channel(
     channel.sample_rate = sample_rate
     channel.gain_db = gain_db
     channel.enabled = bool(enabled)
+    if recording is None:
+        if channel_id is None:
+            channel.recording = direction == "in"
+    else:
+        channel.recording = bool(recording)
     channel.direction = direction
     if device_kind:
         channel.device_kind = device_kind
