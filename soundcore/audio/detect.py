@@ -6,6 +6,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from soundcore.audio.identity import UsbIdentity, assign_tokens, read_usb_identities
+
 _LINE_RE = re.compile(
     r"card\s+(\d+):\s*([^,\[]*?)\s*\[([^\]]+)\],\s*device\s+(\d+):\s*([^,\[]*?)\s*\[([^\]]+)\]",
     re.IGNORECASE,
@@ -23,6 +25,7 @@ class DeviceInfo:
     usb_id: str | None = None
     backend: str = "alsa"  # alsa | pipewire | simulated
     available: bool = True
+    hw: str = ""  # current plughw:N,M for this scan; not a stable id
 
 
 class AudioBackendError(RuntimeError):
@@ -71,28 +74,51 @@ def pipewire_target(device_id: str) -> str | None:
     return target
 
 
-def parse_alsa_listing(text: str, *, direction: str) -> list[DeviceInfo]:
+def parse_alsa_listing(
+    text: str,
+    *,
+    direction: str,
+    identities: dict[int, UsbIdentity] | None = None,
+) -> list[DeviceInfo]:
     devices: list[DeviceInfo] = []
     seen: set[str] = set()
+    parsed_rows = []
     for raw in text.splitlines():
         match = _LINE_RE.search(raw.strip())
         if not match:
             continue
         card, short, long_name, device, _dev_short, dev_long = match.groups()
-        device_id = f"plughw:{card},{device}"
-        if device_id in seen:
-            continue
-        seen.add(device_id)
         label = long_name.strip() or short.strip() or dev_long.strip()
         blob = f"{label} {short} {long_name}"
         # Bluetooth is a PipeWire sink, not an ALSA card. HDMI is output only.
-        # Cards that are only mass storage or HID never appear in arecord/aplay,
-        # and this parser does not read lsusb.
+        # Cards that are only mass storage or HID never appear in arecord/aplay.
         if is_bluetooth_name(blob):
             continue
         if direction == "in" and is_hdmi_name(blob):
             continue
         kind = guess_kind(blob, int(card))
+        parsed_rows.append((int(card), short.strip(), int(device), label, kind))
+    tokens = {}
+    if any(kind == "usb" for *_rest, kind in parsed_rows):
+        token_rows = []
+        for card, short, pcm, _label, kind in parsed_rows:
+            if kind != "usb":
+                continue
+            ident = (identities or {}).get(card)
+            token_rows.append((card, short, pcm, ident))
+        tokens = assign_tokens(token_rows)
+    for card, short, pcm, label, kind in parsed_rows:
+        hw = f"plughw:{card},{pcm}"
+        if kind == "usb":
+            token = tokens.get((card, pcm)) or f"usb-cardid:{short or 'card'}:pcm{pcm}"
+            device_id = f"alsa:{token}"
+            usb_id = token
+        else:
+            device_id = hw
+            usb_id = None
+        if device_id in seen:
+            continue
+        seen.add(device_id)
         if kind == "jack" and direction == "in":
             label = f"3.5 mm {label}"
         devices.append(
@@ -101,9 +127,10 @@ def parse_alsa_listing(text: str, *, direction: str) -> list[DeviceInfo]:
                 name=label.strip(),
                 direction=direction,
                 kind=kind,
-                usb_id=f"card{card}:{short.strip()}",
+                usb_id=usb_id,
                 backend="alsa",
                 available=True,
+                hw=hw,
             )
         )
     return devices
@@ -123,20 +150,54 @@ def _run(command: list[str]) -> str:
 class AlsaBackend:
     name = "alsa"
 
+    def __init__(self, runner=None, identity_reader=None):
+        self._runner = runner or _run
+        self._identity_reader = identity_reader or read_usb_identities
+        self._hw: dict[str, str] = {}
+
     def list_devices(self) -> list[DeviceInfo]:
-        capture = parse_alsa_listing(_run(["arecord", "-l"]), direction="in")
-        playback = parse_alsa_listing(_run(["aplay", "-l"]), direction="out")
-        return capture + playback
+        try:
+            identities = self._identity_reader() or {}
+        except Exception:
+            identities = {}
+        capture = parse_alsa_listing(self._runner(["arecord", "-l"]), direction="in", identities=identities)
+        playback = parse_alsa_listing(self._runner(["aplay", "-l"]), direction="out", identities=identities)
+        devices = capture + playback
+        self._hw = {device.id: device.hw for device in devices if device.hw}
+        return devices
+
+    def resolve(self, device_id: str) -> str:
+        """Current plughw for a stable id. Enumeration order is not remembered."""
+        if not device_id:
+            return ""
+        if device_id in self._hw:
+            return self._hw[device_id]
+        if device_id.startswith("plughw:") or device_id.startswith("hw:"):
+            return device_id
+        if device_id.startswith("alsa:"):
+            # list_devices() is what refreshes this map. Do not scan again here;
+            # the channel loop calls resolve on every buffer.
+            return ""
+        return device_id
 
     def open_capture(self, device_id: str, sample_rate: int, gain_db: float, backend_name: str | None = None):
         from soundcore.audio.capture import AlsaCapture
 
-        return AlsaCapture(device_id, sample_rate, gain_db)
+        hw = self.resolve(device_id)
+        if device_id.startswith("alsa:") and not hw:
+            raise AudioBackendError(f"{device_id} is not connected")
+        return AlsaCapture(hw or device_id, sample_rate, gain_db)
 
     def open_playback(self, device_id: str, sample_rate: int, backend_name: str | None = None):
         from soundcore.audio.capture import AlsaPlayback
 
-        return AlsaPlayback(device_id, sample_rate)
+        hw = self.resolve(device_id)
+        if device_id.startswith("alsa:") and not hw:
+            raise AudioBackendError(f"{device_id} is not connected")
+        playback = AlsaPlayback(hw or device_id, sample_rate)
+        playback.stable_id = device_id
+        playback.opened_hw = hw or device_id
+        return playback
 
 
 class SimulatedBackend:
@@ -360,6 +421,11 @@ class HybridBackend:
         self.last_error = ""
         if hasattr(self.pipewire, "last_error"):
             self.pipewire.last_error = ""
+
+    def resolve(self, device_id: str) -> str:
+        if device_id.startswith("pipewire:") or device_id.startswith("sim:"):
+            return device_id
+        return self.alsa.resolve(device_id)
 
     def open_capture(self, device_id: str, sample_rate: int, gain_db: float, backend_name: str | None = None):
         kind = backend_name or infer_backend(device_id)

@@ -27,10 +27,10 @@ from soundcore.audio.service import load_audio_status
 from soundcore.auth import authenticate, login_required, login_user, logout_user
 from soundcore.maintenance import run_guard
 from soundcore.models import Channel, Event, Recording, Route, Setting, Transcription, utcnow
-from soundcore.ops import OpsError, active_inputs, delete_channel, save_channel, save_route
+from soundcore.audio.tone import queue_test_tone
+from soundcore.ops import OpsError, active_inputs, delete_channel, save_channel, save_route, sync_usb_output_slots
 from soundcore.settings_store import load_runtime, set_setting
 from soundcore.transcription.worker import enqueue_transcription
-from soundcore.settings_store import load_runtime, set_setting
 from soundcore.status import console_status
 from soundcore.transfer import build_export_zip, import_zip
 import io
@@ -278,6 +278,12 @@ def channels_rescan():
     backend = current_app.extensions["audio_backend"]
     if hasattr(backend, "rescan"):
         backend.rescan()
+    if getattr(backend, "name", "") in {"alsa", "hybrid"}:
+        try:
+            sync_usb_output_slots(g.db, backend.list_devices())
+        except Exception:
+            flash("USB output slots could not be updated from this scan.", "error")
+            return redirect(url_for("pages.channels"))
     flash("Device scan refreshed.", "ok")
     return redirect(url_for("pages.channels"))
 
@@ -296,6 +302,10 @@ def channels_save():
             flash(str(exc), "error")
             return redirect(url_for("pages.channels"))
         backend = "sanketptt"
+    usb_id = (request.form.get("usb_id") or "").strip()
+    if usb_id.startswith("usb-") and backend != "sanketptt":
+        device = f"alsa:{usb_id}"
+        backend = "alsa"
     try:
         save_channel(
             g.db,
@@ -308,7 +318,7 @@ def channels_save():
             enabled=request.form.get("enabled") == "on",
             direction=request.form.get("direction") or "in",
             device_kind=request.form.get("device_kind") or "usb",
-            usb_id=request.form.get("usb_id") or None,
+            usb_id=usb_id or None,
             audio_backend=backend,
             device_id=device,
             actor=g.current_user.email,
@@ -316,6 +326,27 @@ def channels_save():
         flash("Channel saved.", "ok")
     except (OpsError, ValueError) as exc:
         flash(str(exc), "error")
+    return redirect(url_for("pages.channels"))
+
+
+@bp.post("/channels/<int:channel_id>/test-tone")
+@login_required
+def channels_test_tone(channel_id: int):
+    channel = g.db.get(Channel, channel_id)
+    if channel is None or channel.direction != "out":
+        flash("Test tone is for an output.", "error")
+        return redirect(url_for("pages.channels"))
+    audio = current_app.extensions.get("audio")
+    if audio is not None:
+        result = audio.play_test_tone_for(channel.id)
+        if result.get("ok"):
+            flash(f"Played a 440 Hz tone on {channel.name}.", "ok")
+        else:
+            flash(f"Test tone failed: {result.get('error') or 'the output did not accept audio'}", "error")
+        return redirect(url_for("pages.channels"))
+    settings = current_app.config["SETTINGS"]
+    queue_test_tone(settings.data_dir, channel.id)
+    flash(f"Test tone requested for {channel.name}. The activity log records whether it played.", "ok")
     return redirect(url_for("pages.channels"))
 
 

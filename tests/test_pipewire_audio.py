@@ -107,10 +107,15 @@ class FakeProc:
 def test_alsa_discovery_skips_hdmi_inputs_bluetooth_and_lsusb():
     capture = parse_alsa_listing(HDMI_AND_USB + LSUSB_NOISE, direction="in")
     playback = parse_alsa_listing(HDMI_AND_USB, direction="out")
-    assert [device.id for device in capture] == ["plughw:2,0"]
+    assert [device.id for device in capture] == ["alsa:usb-cardid:Device:pcm0"]
     assert capture[0].backend == "alsa"
     assert capture[0].direction == "in"
-    assert [device.id for device in playback] == ["plughw:0,0", "plughw:1,0", "plughw:2,0"]
+    assert capture[0].hw == "plughw:2,0"
+    assert [device.id for device in playback] == [
+        "plughw:0,0",
+        "plughw:1,0",
+        "alsa:usb-cardid:Device:pcm0",
+    ]
     assert all(device.kind == "hdmi" for device in playback[:2])
     assert all(not device.id.startswith("blue") for device in capture + playback)
     source = Path("soundcore/audio/detect.py").read_text(encoding="utf-8")

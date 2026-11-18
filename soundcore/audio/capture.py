@@ -205,7 +205,8 @@ class AlsaPlayback(_FfmpegPipe):
         try:
             self.proc.stdin.write(pcm)
             self.proc.stdin.flush()
-        except (BrokenPipeError, OSError):
+        except (BrokenPipeError, OSError) as exc:
+            self.last_error = str(exc)
             self.stop()
 
 

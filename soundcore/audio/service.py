@@ -142,6 +142,7 @@ class AudioService:
         self._runtime_at = 0.0
         self._flow: dict[int, dict] = {}
         self._flow_lock = threading.Lock()
+        self._usb_present: set[str] | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -200,16 +201,18 @@ class AudioService:
                     audio_backend=backend_name,
                 )
             route_rows = session.query(Route).filter_by(enabled=True).all()
-            outputs = {row.id: row for row in session.query(Channel).filter_by(direction="out").all()}
             try:
-                available = {
-                    device.id
-                    for device in self.backend.list_devices()
-                    if device.available
-                }
+                scanned = list(self.backend.list_devices())
             except Exception:
                 logger.exception("device scan failed")
-                available = set()
+                scanned = []
+            if getattr(self.backend, "name", "") in {"alsa", "hybrid"}:
+                from soundcore.ops import sync_usb_output_slots
+
+                present = sync_usb_output_slots(session, scanned)
+                self._note_usb(session, present)
+            available = {device.id for device in scanned if device.available}
+            outputs = {row.id: row for row in session.query(Channel).filter_by(direction="out").all()}
             routes, notices = plan_routes(route_rows, outputs, available)
             desired_specs = desired
             self._sync_sanket(session, rows)
@@ -217,6 +220,7 @@ class AudioService:
             self._routes = routes
             self._notices = notices
         self._publish_status(desired_specs, available)
+        self._drain_test_tone()
 
         stale = [channel_id for channel_id in self._workers if channel_id not in desired]
         for channel_id in stale:
@@ -253,6 +257,72 @@ class AudioService:
                     f"{spec.name} started on {spec.audio_backend}",
                     channel=spec.slug,
                 )
+
+    def _note_usb(self, session, present: list[dict]) -> None:
+        from soundcore.activity import record_activity
+
+        current = {row["usb_id"] for row in present if row.get("usb_id")}
+        names = {row["usb_id"]: row.get("name") or row["usb_id"] for row in present}
+        previous = self._usb_present
+        if previous is None:
+            previous = set()
+        for usb_id in sorted(current - previous):
+            record_activity(
+                "usb_device_connected",
+                f"{names.get(usb_id, usb_id)} connected ({usb_id})",
+                channel=str(names.get(usb_id, ""))[:80],
+                session=session,
+            )
+        if self._usb_present is not None:
+            for usb_id in sorted(previous - current):
+                record_activity(
+                    "usb_device_disconnected",
+                    f"USB audio disconnected ({usb_id})",
+                    channel=usb_id[:80],
+                    level="warning",
+                    session=session,
+                )
+        self._usb_present = current
+
+    def _drain_test_tone(self) -> None:
+        from soundcore.audio.tone import take_test_tone
+
+        channel_id = take_test_tone(self.settings.data_dir)
+        if channel_id:
+            self.play_test_tone_for(channel_id)
+
+    def play_test_tone_for(self, channel_id: int) -> dict:
+        from soundcore.activity import record_activity
+        from soundcore.audio.tone import play_test_tone
+        from soundcore.ops import channel_endpoint
+
+        with session_scope() as session:
+            channel = session.get(Channel, channel_id)
+            if channel is None or channel.direction != "out":
+                return {"ok": False, "error": "Test tone is for an output channel", "bytes": 0}
+            device_id, backend_name = channel_endpoint(channel)
+            name = channel.name
+            slug = channel.slug
+            sample_rate = channel.sample_rate or 48000
+        if hasattr(self.backend, "list_devices"):
+            try:
+                self.backend.list_devices()
+            except Exception:
+                logger.exception("device scan before test tone failed")
+        result = play_test_tone(self.backend, device_id, sample_rate, backend_name)
+        record_activity(
+            "test_tone" if result["ok"] else "error",
+            f"Test tone on {name}" + ("" if result["ok"] else f": {result['error']}"),
+            channel=slug,
+            level="info" if result["ok"] else "error",
+        )
+        return result
+
+    def _hw_for(self, device_id: str) -> str:
+        resolve = getattr(self.backend, "resolve", None)
+        if resolve is None:
+            return device_id
+        return resolve(device_id) or ""
 
     def _sync_sanket(self, session, enabled_inputs) -> None:
         from soundcore.activity import record_activity
@@ -461,16 +531,19 @@ class AudioService:
     def _sync_playbacks(self, spec: ChannelSpec, playbacks: list, open_ids: list[str]) -> None:
         desired = self._routes_for(spec.id)
         desired_ids = [target.device_id for target in desired]
-        if desired_ids == open_ids and all(_playback_alive(item) for item in playbacks):
-            return
-        if desired_ids == open_ids:
-            for playback in playbacks:
-                if not _playback_alive(playback):
-                    try:
-                        playback.start()
-                    except Exception:
-                        logger.exception("playback restart failed")
-            self._note_playbacks(playbacks)
+        if desired_ids == open_ids and playbacks:
+            needs_reopen = False
+            for playback, target in zip(playbacks, desired):
+                hw = self._hw_for(target.device_id)
+                opened = getattr(playback, "opened_hw", "")
+                alive = _playback_alive(playback)
+                if hw and (not alive or opened != hw):
+                    needs_reopen = True
+                if not hw and alive and opened:
+                    needs_reopen = True
+            if not needs_reopen:
+                return
+        if desired_ids == open_ids and not playbacks:
             return
         for playback in playbacks:
             try:
@@ -480,16 +553,22 @@ class AudioService:
         playbacks.clear()
         open_ids.clear()
         for target in desired:
-            playback = self.backend.open_playback(
-                target.device_id,
-                target.sample_rate or spec.sample_rate,
-                backend_name=target.backend,
-            )
-            try:
-                playback.start()
-            except Exception as exc:
-                playback.last_error = str(exc)
-                logger.exception("playback failed to start for %s", target.device_id)
+            hw = self._hw_for(target.device_id)
+            playback = None
+            if target.device_id.startswith("alsa:") and not hw:
+                playback = _ClosedPlayback(target.device_id)
+            else:
+                try:
+                    playback = self.backend.open_playback(
+                        target.device_id,
+                        target.sample_rate or spec.sample_rate,
+                        backend_name=target.backend,
+                    )
+                    playback.opened_hw = getattr(playback, "opened_hw", "") or hw or target.device_id
+                    playback.start()
+                except Exception as exc:
+                    playback = _ClosedPlayback(target.device_id, str(exc))
+                    logger.exception("playback failed to start for %s", target.device_id)
             playbacks.append(playback)
             open_ids.append(target.device_id)
             from soundcore.activity import record_activity
@@ -753,6 +832,28 @@ def _playback_alive(playback) -> bool:
     if getattr(playback, "last_error", "") and proc is None and getattr(playback, "_sock", None) is None:
         return False
     return True
+
+
+class _ClosedPlayback:
+    """A route whose USB output is unplugged. It writes nothing and is not alive."""
+
+    def __init__(self, device_id: str, error: str = "not connected"):
+        self.device_id = device_id
+        self.opened_hw = ""
+        self.last_error = error
+        self.proc = None
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def write(self, pcm: bytes) -> None:
+        return None
+
+    def status(self) -> dict:
+        return {"backend": "alsa", "device": self.device_id, "running": False, "last_error": self.last_error}
 
 class _NotifySettings:
     def __init__(self, settings, runtime):

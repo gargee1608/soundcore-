@@ -183,7 +183,6 @@
     <input type="hidden" name="channel_id" value="{{ channel.id }}">
     <input type="hidden" name="direction" value="{{ channel.direction }}">
     <input type="hidden" name="device_kind" value="{{ channel.device_kind }}">
-    <input type="hidden" name="usb_id" value="{{ channel.usb_id or '' }}">
     <input type="hidden" name="audio_backend" value="{{ channel.audio_backend or 'alsa' }}">
     <input type="hidden" name="device_id" value="{{ device_key }}">
     <label>Name <input name="name" value="{{ channel.name }}" required></label>
@@ -206,9 +205,20 @@
       </select>
     </label>
     <label>Gain dB <input name="gain_db" type="number" step="0.5" min="-24" max="24" value="{{ channel.gain_db }}"></label>
+    {% if channel.direction == 'out' %}
+    <label>USB identity <input name="usb_id" value="{{ channel.usb_id or '' }}" placeholder="usb-path:…"></label>
+    {% else %}
+    <input type="hidden" name="usb_id" value="{{ channel.usb_id or '' }}">
+    {% endif %}
     <label class="check"><input type="checkbox" name="enabled" {% if channel.enabled %}checked{% endif %}> {{ 'Record' if channel.direction == 'in' else 'Available' }}</label>
     <button class="btn solid" type="submit">Save</button>
   </form>
+  {% if channel.direction == 'out' %}
+  <form method="post" action="{{ url_for('pages.channels_test_tone', channel_id=channel.id) }}" class="inline-delete">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn ghost" type="submit">Test tone</button>
+  </form>
+  {% endif %}
   <form method="post" action="{{ url_for('pages.channels_delete', channel_id=channel.id) }}" class="inline-delete">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button class="btn ghost danger" type="submit">Remove</button>

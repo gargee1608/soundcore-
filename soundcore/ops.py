@@ -153,6 +153,78 @@ def save_channel(
     return channel
 
 
+def sync_usb_output_slots(session, devices) -> list[dict]:
+    """Keep USB Audio 1-4 pinned to stable ids. Card numbers are not stored.
+
+    Returns the playback devices that were seen, so the caller can log
+    connect and disconnect from the difference. Unplugging does not clear
+    a pin. HDMI, the onboard jack, Bluetooth, and ambiguous adapters are
+    not given a slot.
+    """
+    from soundcore.audio.identity import USB_OUTPUT_SLOTS
+
+    usb_outs = []
+    for device in devices:
+        token = device.usb_id or ""
+        if device.direction != "out" or device.kind != "usb" or (device.backend or "alsa") != "alsa":
+            continue
+        if not token.startswith("usb-") or token.startswith("usb-ambiguous"):
+            continue
+        usb_outs.append(device)
+    usb_outs.sort(key=lambda device: device.usb_id or "")
+
+    slots = []
+    for index, name in enumerate(USB_OUTPUT_SLOTS, start=1):
+        slug = f"usb-audio-{index}"
+        row = session.query(Channel).filter_by(slug=slug).one_or_none()
+        if row is None:
+            row = Channel(
+                name=name,
+                slug=slug,
+                direction="out",
+                alsa_device=f"alsa:unassigned:{index}",
+                audio_backend="alsa",
+                device_id=f"alsa:unassigned:{index}",
+                usb_id="",
+                device_kind="usb",
+                sample_rate=48000,
+                format="s16le",
+                gain_db=0.0,
+                enabled=False,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            session.add(row)
+            session.flush()
+        slots.append(row)
+
+    by_usb = {row.usb_id: row for row in slots if row.usb_id}
+    claimed: set[int] = set()
+    for device in usb_outs:
+        row = by_usb.get(device.usb_id)
+        if row is None or row.id in claimed:
+            row = next((slot for slot in slots if not slot.usb_id and slot.id not in claimed), None)
+        if row is None:
+            continue
+        claimed.add(row.id)
+        first_pin = not row.usb_id
+        row.usb_id = device.usb_id
+        row.device_id = device.id
+        row.alsa_device = device.hw or device.id
+        row.audio_backend = "alsa"
+        row.device_kind = "usb"
+        row.direction = "out"
+        if first_pin:
+            row.enabled = True
+        row.updated_at = utcnow()
+        by_usb[device.usb_id] = row
+    session.flush()
+    return [
+        {"usb_id": device.usb_id, "name": device.name, "hw": device.hw, "id": device.id}
+        for device in usb_outs
+    ]
+
+
 def delete_channel(session, channel_id: int) -> str:
     from soundcore.models import Recording
 
